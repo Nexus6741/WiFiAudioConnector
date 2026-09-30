@@ -90,7 +90,8 @@ namespace WiFiAudioConnector
             string modeIcon = IsBluetooth ? "🎧" : (IsUsb ? "🔌" : "📶");
             string modeTag = IsBluetooth ? "蓝牙 A2DP" : (IsUsb ? "USB 有线" : "Wi-Fi 无线");
             string hkTag = Enabled && Key != Key.None ? HotkeyManager.FormatHotkey(Modifiers, Key) : "未设置";
-            return string.Format("{0}  {1} [{2}]  ({3})   ▶   快捷键: {4}", modeIcon, DeviceName, modeTag, Target, hkTag);
+            string displayTarget = IsBluetooth ? "蓝牙原生配对" : Target;
+            return string.Format("{0}  {1} [{2}]  ({3})   ▶   快捷键: {4}", modeIcon, DeviceName, modeTag, displayTarget, hkTag);
         }
     }
 
@@ -276,29 +277,7 @@ namespace WiFiAudioConnector
             return false;
         }
 
-        public static bool SetMasterEndpointVolume(float volume, bool? mute = null)
-        {
-            try
-            {
-                var enumerator = (IMMDeviceEnumerator)(new MMDeviceEnumeratorComObject());
-                IMMDevice device;
-                if (enumerator.GetDefaultAudioEndpoint(EDataFlow.eRender, ERole.eMultimedia, out device) == 0 && device != null)
-                {
-                    Guid iid = typeof(IAudioEndpointVolume).GUID;
-                    object o;
-                    if (device.Activate(ref iid, 1, IntPtr.Zero, out o) == 0 && o is IAudioEndpointVolume)
-                    {
-                        var endpoint = (IAudioEndpointVolume)o;
-                        Guid dummy = Guid.Empty;
-                        endpoint.SetMasterVolumeLevelScalar(volume, ref dummy);
-                        if (mute.HasValue) endpoint.SetMute(mute.Value, ref dummy);
-                        return true;
-                    }
-                }
-            }
-            catch { }
-            return false;
-        }
+        // Master endpoint volume control intentionally removed so this app NEVER affects Windows system master volume.
     }
     #endregion
 
@@ -798,6 +777,17 @@ namespace WiFiAudioConnector
             }
             catch { }
 
+            if (s.Target == "Bluetooth A2DP:5555" || s.Target == "Bluetooth A2DP" || s.DeviceIp == "Bluetooth A2DP")
+            {
+                s.Target = "192.168.31.239:5555";
+                s.DeviceIp = "192.168.31.239";
+                s.Port = 5555;
+            }
+            if (s.DeviceHotkeys.ContainsKey("Bluetooth A2DP:5555"))
+            {
+                s.DeviceHotkeys.Remove("Bluetooth A2DP:5555");
+            }
+
             if (s.DeviceHotkeys.Count == 0)
             {
                 s.SeedDefaultHotkeys();
@@ -1004,6 +994,7 @@ namespace WiFiAudioConnector
             _bindingsList.Clear();
             foreach (var b in _app.CurrentSettings.DeviceHotkeys.Values)
             {
+                if (string.Equals(b.Target, "Bluetooth A2DP:5555", StringComparison.OrdinalIgnoreCase)) continue;
                 _bindingsList.Add(new DeviceHotkeyBinding
                 {
                     Target = b.Target,
@@ -1014,6 +1005,66 @@ namespace WiFiAudioConnector
                     Key = b.Key,
                     Enabled = b.Enabled
                 });
+            }
+
+            // Immediately pull any devices cached in App.LastDiscoveredDevices
+            if (_app.LastDiscoveredDevices != null)
+            {
+                foreach (var d in _app.LastDiscoveredDevices)
+                {
+                    if (string.IsNullOrEmpty(d.Target) || d.IsCustom) continue;
+                    bool exists = false;
+                    foreach (var b in _bindingsList)
+                    {
+                        if (string.Equals(b.Target, d.Target, StringComparison.OrdinalIgnoreCase))
+                        {
+                            exists = true;
+                            break;
+                        }
+                    }
+                    if (!exists)
+                    {
+                        _bindingsList.Add(new DeviceHotkeyBinding
+                        {
+                            Target = d.Target,
+                            DeviceName = d.Name,
+                            IsUsb = d.IsUsb,
+                            IsBluetooth = d.IsBluetooth,
+                            Modifiers = ModifierKeys.Control | ModifierKeys.Alt,
+                            Key = d.IsBluetooth ? Key.D3 : (d.IsUsb ? Key.D2 : Key.D1),
+                            Enabled = true
+                        });
+                    }
+                }
+            }
+
+            // If current active target is not yet in bindings, add it
+            string curTarget = _app.CurrentSettings.Target;
+            if (!string.IsNullOrEmpty(curTarget) && !string.Equals(curTarget, "Bluetooth A2DP:5555", StringComparison.OrdinalIgnoreCase))
+            {
+                bool found = false;
+                foreach (var b in _bindingsList)
+                {
+                    if (string.Equals(b.Target, curTarget, StringComparison.OrdinalIgnoreCase))
+                    {
+                        found = true;
+                        break;
+                    }
+                }
+                if (!found)
+                {
+                    bool isBt = curTarget.StartsWith(@"\\?\BTHENUM", StringComparison.OrdinalIgnoreCase) || curTarget.StartsWith("Bluetooth#", StringComparison.OrdinalIgnoreCase);
+                    _bindingsList.Add(new DeviceHotkeyBinding
+                    {
+                        Target = curTarget,
+                        DeviceName = _app.CurrentSettings.DeviceName,
+                        IsUsb = !isBt && !curTarget.Contains(":"),
+                        IsBluetooth = isBt,
+                        Modifiers = ModifierKeys.Control | ModifierKeys.Alt,
+                        Key = isBt ? Key.D3 : (curTarget.Contains(":") ? Key.D1 : Key.D2),
+                        Enabled = true
+                    });
+                }
             }
         }
 
@@ -1257,9 +1308,10 @@ namespace WiFiAudioConnector
 
             addPreset("Ctrl+Shift+W (无线常用)", ModifierKeys.Control | ModifierKeys.Shift, Key.W);
             addPreset("Ctrl+Shift+U (有线常用)", ModifierKeys.Control | ModifierKeys.Shift, Key.U);
+            addPreset("Ctrl+Shift+B (蓝牙常用)", ModifierKeys.Control | ModifierKeys.Shift, Key.B);
             addPreset("Ctrl+Alt+1", ModifierKeys.Control | ModifierKeys.Alt, Key.D1);
             addPreset("Ctrl+Alt+2", ModifierKeys.Control | ModifierKeys.Alt, Key.D2);
-            addPreset("Ctrl+Alt+U", ModifierKeys.Control | ModifierKeys.Alt, Key.U);
+            addPreset("Ctrl+Alt+3 (蓝牙)", ModifierKeys.Control | ModifierKeys.Alt, Key.D3);
             addPreset("F9", ModifierKeys.None, Key.F9);
 
             editCardPanel.Children.Add(presetRow);
@@ -1374,15 +1426,27 @@ namespace WiFiAudioConnector
             mainBorder.Child = root;
             Content = mainBorder;
 
+            int defaultSel = 0;
+            string selTarget = _app.CurrentSettings.Target;
+            for (int i = 0; i < _bindingsList.Count; i++)
+            {
+                if (string.Equals(_bindingsList[i].Target, selTarget, StringComparison.OrdinalIgnoreCase))
+                {
+                    defaultSel = i;
+                    break;
+                }
+            }
             if (_lbDevices.Items.Count > 0)
             {
-                _lbDevices.SelectedIndex = 0;
+                _lbDevices.SelectedIndex = defaultSel;
             }
+
+            Loaded += (s, e) => ScanAndAddDevices();
         }
 
         private async void ScanAndAddDevices()
         {
-            _tbStatus.Text = "正在扫描局域网与USB设备...";
+            _tbStatus.Text = "正在扫描局域网、USB与蓝牙设备...";
             _tbStatus.Foreground = new SolidColorBrush(Color.FromArgb(255, 245, 180, 50));
 
             var scanned = await _app.ScanDevicesAsync();
@@ -1396,6 +1460,9 @@ namespace WiFiAudioConnector
                     if (string.Equals(b.Target, d.Target, StringComparison.OrdinalIgnoreCase))
                     {
                         exists = true;
+                        b.DeviceName = d.Name;
+                        b.IsUsb = d.IsUsb;
+                        b.IsBluetooth = d.IsBluetooth;
                         break;
                     }
                 }
@@ -1408,7 +1475,7 @@ namespace WiFiAudioConnector
                         IsUsb = d.IsUsb,
                         IsBluetooth = d.IsBluetooth,
                         Modifiers = ModifierKeys.Control | ModifierKeys.Alt,
-                        Key = d.IsBluetooth ? Key.B : (d.IsUsb ? Key.U : Key.W),
+                        Key = d.IsBluetooth ? Key.D3 : (d.IsUsb ? Key.D2 : Key.D1),
                         Enabled = true
                     };
                     _bindingsList.Add(newBinding);
@@ -1416,11 +1483,25 @@ namespace WiFiAudioConnector
                 }
             }
 
-            _lbDevices.ItemsSource = null;
-            _lbDevices.ItemsSource = _bindingsList;
-            if (_lbDevices.Items.Count > 0) _lbDevices.SelectedIndex = _lbDevices.Items.Count - 1;
+            _lbDevices.Items.Refresh();
 
-            _tbStatus.Text = addedCount > 0 ? string.Format("✓ 扫描完成，新增了 {0} 个连接方式！", addedCount) : "✓ 扫描完成，已连接设备均在列表中。";
+            // Pre-select current target if nothing selected
+            if (_lbDevices.SelectedItem == null && _bindingsList.Count > 0)
+            {
+                string curTarget = _app.CurrentSettings.Target;
+                int sel = 0;
+                for (int i = 0; i < _bindingsList.Count; i++)
+                {
+                    if (string.Equals(_bindingsList[i].Target, curTarget, StringComparison.OrdinalIgnoreCase))
+                    {
+                        sel = i;
+                        break;
+                    }
+                }
+                _lbDevices.SelectedIndex = sel;
+            }
+
+            _tbStatus.Text = addedCount > 0 ? string.Format("✓ 扫描完成，新增了 {0} 个连接方式（含蓝牙/USB/无线）！", addedCount) : "✓ 扫描完成，所有设备与连接模式（含蓝牙）均在列表中。";
             _tbStatus.Foreground = new SolidColorBrush(Color.FromArgb(255, 80, 200, 120));
         }
 
@@ -1434,8 +1515,9 @@ namespace WiFiAudioConnector
                 return;
             }
 
-            string modeTag = _selectedBinding.IsUsb ? "USB 有线直连" : "Wi-Fi 无线网络";
-            _tbSelectedTitle.Text = string.Format("正在设置: {0} [{1}] ({2})", _selectedBinding.DeviceName, modeTag, _selectedBinding.Target);
+            string modeTag = _selectedBinding.IsBluetooth ? "蓝牙 A2DP 直通" : (_selectedBinding.IsUsb ? "USB 有线直连" : "Wi-Fi 无线网络");
+            string targetLabel = _selectedBinding.IsBluetooth ? "蓝牙原生配对" : _selectedBinding.Target;
+            _tbSelectedTitle.Text = string.Format("正在设置: {0} [{1}] ({2})", _selectedBinding.DeviceName, modeTag, targetLabel);
             _tempMod = _selectedBinding.Modifiers;
             _tempKey = _selectedBinding.Key;
             _cbEnable.IsChecked = _selectedBinding.Enabled;
@@ -1506,6 +1588,7 @@ namespace WiFiAudioConnector
             _app.CurrentSettings.DeviceHotkeys.Clear();
             foreach (var b in _bindingsList)
             {
+                if (string.Equals(b.Target, "Bluetooth A2DP:5555", StringComparison.OrdinalIgnoreCase)) continue;
                 _app.CurrentSettings.DeviceHotkeys[b.Target] = b;
             }
             _app.CurrentSettings.Save();
@@ -1529,6 +1612,7 @@ namespace WiFiAudioConnector
         private bool _isBluetoothConnected = false;
         public bool IsBluetoothConnected { get { return _isBluetoothConnected; } }
         private bool _isConnecting = false;
+        public List<DeviceItem> LastDiscoveredDevices = new List<DeviceItem>();
         private HotkeyManager _hotkeyManager = null;
         private HotkeyConfigWindow _hotkeyWin = null;
         private ToolStripMenuItem _notifyMenuItem = null;
@@ -1678,6 +1762,10 @@ namespace WiFiAudioConnector
 
         private void OnTrayWheelVolumeDelta(int delta)
         {
+            if (!IsConnected || _isBluetoothConnected || _scrcpyProc == null || _scrcpyProc.HasExited)
+            {
+                return;
+            }
             Dispatcher.BeginInvoke(new Action(() =>
             {
                 int cur = _settings.MasterVolume;
@@ -1687,8 +1775,7 @@ namespace WiFiAudioConnector
                 {
                     _flyout.UpdateVolumeUI(newVol, false);
                 }
-                string connTag = IsConnected ? "已连接" : "未连接";
-                _notifyIcon.Text = string.Format("WiFi 音频连接器 - 音量: {0}% ({1})", newVol, connTag);
+                _notifyIcon.Text = string.Format("WiFi 音频连接器 - 音量: {0}% (已连接)", newVol);
             }));
         }
 
@@ -1795,8 +1882,9 @@ namespace WiFiAudioConnector
             var list = new List<DeviceItem>();
             string adbPath = FindToolPath("adb.exe");
 
-            await Task.Run(() =>
+            var adbTask = Task.Run(() =>
             {
+                var adbList = new List<DeviceItem>();
                 try
                 {
                     var psi = new ProcessStartInfo
@@ -1843,7 +1931,7 @@ namespace WiFiAudioConnector
                                     friendlyName = match.Success ? match.Groups[1].Value : serial;
                                 }
 
-                                list.Add(new DeviceItem
+                                adbList.Add(new DeviceItem
                                 {
                                     Name = friendlyName,
                                     Target = serial,
@@ -1857,13 +1945,27 @@ namespace WiFiAudioConnector
                     }
                 }
                 catch { }
+                return adbList;
             });
 
+            Task<List<BluetoothAudioDevice>> btTask = null;
             if (BluetoothAudioConnector.IsSupported)
             {
                 try
                 {
-                    var btDevices = await BluetoothAudioConnector.ScanDevicesAsync();
+                    btTask = BluetoothAudioConnector.ScanDevicesAsync();
+                }
+                catch { }
+            }
+
+            var adbRes = await adbTask;
+            list.AddRange(adbRes);
+
+            if (btTask != null)
+            {
+                try
+                {
+                    var btDevices = await btTask;
                     foreach (var bt in btDevices)
                     {
                         list.Add(new DeviceItem
@@ -1879,6 +1981,34 @@ namespace WiFiAudioConnector
                     }
                 }
                 catch { }
+            }
+
+            LastDiscoveredDevices = new List<DeviceItem>(list);
+
+            // Ensure newly discovered devices exist in settings hotkeys dictionary
+            bool modified = false;
+            foreach (var d in list)
+            {
+                if (string.IsNullOrEmpty(d.Target)) continue;
+                if (!_settings.DeviceHotkeys.ContainsKey(d.Target))
+                {
+                    _settings.DeviceHotkeys[d.Target] = new DeviceHotkeyBinding
+                    {
+                        Target = d.Target,
+                        DeviceName = d.Name,
+                        IsUsb = d.IsUsb,
+                        IsBluetooth = d.IsBluetooth,
+                        Modifiers = ModifierKeys.Control | ModifierKeys.Alt,
+                        Key = d.IsBluetooth ? Key.D3 : (d.IsUsb ? Key.D2 : Key.D1),
+                        Enabled = true
+                    };
+                    modified = true;
+                }
+            }
+            if (modified)
+            {
+                _settings.Save();
+                ApplyAllHotkeys();
             }
 
             return list;
@@ -2293,7 +2423,7 @@ namespace WiFiAudioConnector
                 if (binding != null)
                 {
                     _settings.DeviceName = binding.DeviceName;
-                    if (!binding.IsUsb && target.Contains(":"))
+                    if (!binding.IsUsb && !binding.IsBluetooth && target.Contains(":"))
                     {
                         var sp = target.Split(':');
                         _settings.DeviceIp = sp[0];
@@ -2624,11 +2754,7 @@ namespace WiFiAudioConnector
             _lastSliderSetTime = DateTime.Now;
 
             float ratio = volumePercent / 100.0f;
-            if (_isBluetoothConnected)
-            {
-                WindowsAudioSessionController.SetMasterEndpointVolume(ratio, isMuted);
-            }
-            else if (_scrcpyProc != null && !_scrcpyProc.HasExited)
+            if (!_isBluetoothConnected && _scrcpyProc != null && !_scrcpyProc.HasExited)
             {
                 WindowsAudioSessionController.SetProcessVolume(_scrcpyProc.Id, ratio, isMuted);
             }
@@ -2724,6 +2850,10 @@ namespace WiFiAudioConnector
         private bool _isUserDragging = false;
         private TextBox _tbIp;
         private TextBox _tbPort;
+        private TextBlock _tbColon;
+        private Border _volumeCard;
+        private Border _qualityCard;
+        private bool _isProgrammaticTextChange = false;
         private TextBlock _txtHotkeyDisplay;
         private List<DeviceItem> _deviceList = new List<DeviceItem>();
 
@@ -2939,16 +3069,21 @@ namespace WiFiAudioConnector
             };
             _tbPort.TextChanged += (s, e) =>
             {
+                if (_isProgrammaticTextChange) return;
                 int p;
                 if (int.TryParse(_tbPort.Text, out p))
                 {
                     _app.CurrentSettings.Port = p;
-                    _app.CurrentSettings.Target = string.Format("{0}:{1}", _app.CurrentSettings.DeviceIp, p);
-                    _app.CurrentSettings.Save();
+                    var sel = _cbDevices != null ? _cbDevices.SelectedItem as DeviceItem : null;
+                    if (sel == null || (!sel.IsBluetooth && !sel.IsUsb))
+                    {
+                        _app.CurrentSettings.Target = string.Format("{0}:{1}", _app.CurrentSettings.DeviceIp, p);
+                        _app.CurrentSettings.Save();
+                    }
                 }
             };
 
-            var colon = new TextBlock
+            _tbColon = new TextBlock
             {
                 Text = " : ",
                 Foreground = System.Windows.Media.Brushes.White,
@@ -2956,7 +3091,7 @@ namespace WiFiAudioConnector
                 HorizontalAlignment = HorizontalAlignment.Right
             };
             DockPanel.SetDock(_tbPort, Dock.Right);
-            DockPanel.SetDock(colon, Dock.Right);
+            DockPanel.SetDock(_tbColon, Dock.Right);
 
             _tbIp = new TextBox
             {
@@ -2973,14 +3108,20 @@ namespace WiFiAudioConnector
             };
             _tbIp.TextChanged += (s, e) =>
             {
-                _app.CurrentSettings.DeviceIp = _tbIp.Text.Trim();
-                _app.CurrentSettings.Target = string.Format("{0}:{1}", _tbIp.Text.Trim(), _app.CurrentSettings.Port);
-                _app.CurrentSettings.Save();
+                if (_isProgrammaticTextChange) return;
+                string ip = _tbIp.Text.Trim();
+                _app.CurrentSettings.DeviceIp = ip;
+                var sel = _cbDevices != null ? _cbDevices.SelectedItem as DeviceItem : null;
+                if (sel == null || (!sel.IsBluetooth && !sel.IsUsb))
+                {
+                    _app.CurrentSettings.Target = string.Format("{0}:{1}", ip, _app.CurrentSettings.Port);
+                    _app.CurrentSettings.Save();
+                }
             };
             DockPanel.SetDock(_tbIp, Dock.Right);
 
             ipRow.Children.Add(_tbPort);
-            ipRow.Children.Add(colon);
+            ipRow.Children.Add(_tbColon);
             ipRow.Children.Add(_tbIp);
             ipRow.Children.Add(ipLabel);
             devicePanel.Children.Add(ipRow);
@@ -3008,7 +3149,7 @@ namespace WiFiAudioConnector
             root.Children.Add(deviceCard);
 
             // Volume Control Card
-            var volumeCard = new Border
+            _volumeCard = new Border
             {
                 Background = new SolidColorBrush(Color.FromArgb(160, 42, 45, 54)),
                 CornerRadius = new CornerRadius(8),
@@ -3205,11 +3346,11 @@ namespace WiFiAudioConnector
             volumePanel.Children.Add(_cbSyncPhoneVolume);
             volumePanel.Children.Add(_cbMuteOnDisconnect);
 
-            volumeCard.Child = volumePanel;
-            root.Children.Add(volumeCard);
+            _volumeCard.Child = volumePanel;
+            root.Children.Add(_volumeCard);
 
             // Audio Quality Settings Card
-            var qualityCard = new Border
+            _qualityCard = new Border
             {
                 Background = new SolidColorBrush(Color.FromArgb(160, 42, 45, 54)),
                 CornerRadius = new CornerRadius(8),
@@ -3259,8 +3400,8 @@ namespace WiFiAudioConnector
             _rbOpus128.Checked += (s, e) => { _app.CurrentSettings.Codec = "opus128"; _app.CurrentSettings.Save(); };
             qualityPanel.Children.Add(_rbOpus128);
 
-            qualityCard.Child = qualityPanel;
-            root.Children.Add(qualityCard);
+            _qualityCard.Child = qualityPanel;
+            root.Children.Add(_qualityCard);
 
             // Output Options
             var optsCard = new Border
@@ -3425,9 +3566,42 @@ namespace WiFiAudioConnector
                 }
             }
             _cbDevices.SelectedIndex = selIdx;
+            var curSel = _cbDevices.SelectedItem as DeviceItem;
+            if (curSel != null)
+            {
+                UpdateScrcpyControlsState(curSel.IsBluetooth, curSel.IsUsb);
+            }
 
             _btnScan.IsEnabled = true;
             _btnScan.Content = "🔄 扫描";
+        }
+
+        public void UpdateScrcpyControlsState(bool isBluetooth, bool isUsb)
+        {
+            bool isScrcpy = !isBluetooth;
+            if (_volumeCard != null)
+            {
+                _volumeCard.IsEnabled = isScrcpy;
+                _volumeCard.Opacity = isScrcpy ? 1.0 : 0.35;
+            }
+            if (_qualityCard != null)
+            {
+                _qualityCard.IsEnabled = isScrcpy;
+                _qualityCard.Opacity = isScrcpy ? 1.0 : 0.35;
+            }
+            if (_cbMutePhone != null)
+            {
+                _cbMutePhone.IsEnabled = isScrcpy;
+                _cbMutePhone.Opacity = isScrcpy ? 1.0 : 0.35;
+            }
+            if (_tbColon != null)
+            {
+                _tbColon.Visibility = (isBluetooth || isUsb) ? Visibility.Collapsed : Visibility.Visible;
+            }
+            if (_tbPort != null)
+            {
+                _tbPort.Visibility = (isBluetooth || isUsb) ? Visibility.Collapsed : Visibility.Visible;
+            }
         }
 
         private void OnDeviceSelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -3435,28 +3609,79 @@ namespace WiFiAudioConnector
             var item = _cbDevices.SelectedItem as DeviceItem;
             if (item == null) return;
 
+            UpdateScrcpyControlsState(item.IsBluetooth, item.IsUsb);
+
             if (item.IsCustom)
             {
+                _isProgrammaticTextChange = true;
+                try
+                {
+                    _tbIp.Text = _app.CurrentSettings.DeviceIp;
+                    _tbPort.Text = _app.CurrentSettings.Port.ToString();
+                }
+                finally { _isProgrammaticTextChange = false; }
+
                 _tbIp.IsEnabled = true;
                 _tbPort.IsEnabled = true;
                 _btnSwitchUsb.Visibility = Visibility.Collapsed;
             }
             else if (item.IsBluetooth)
             {
-                _app.CurrentSettings.DeviceName = item.Name;
-                _app.CurrentSettings.Target = item.Target;
-                _tbIp.Text = "Bluetooth A2DP";
+                _isProgrammaticTextChange = true;
+                try
+                {
+                    _tbIp.Text = "Bluetooth A2DP";
+                    _tbPort.Text = "";
+                }
+                finally { _isProgrammaticTextChange = false; }
+
                 _tbIp.IsEnabled = false;
-                _tbPort.Text = "--";
                 _tbPort.IsEnabled = false;
                 _btnSwitchUsb.Visibility = Visibility.Collapsed;
+
+                _app.CurrentSettings.DeviceName = item.Name;
+                _app.CurrentSettings.Target = item.Target;
+
+                if (!_app.CurrentSettings.DeviceHotkeys.ContainsKey(item.Target))
+                {
+                    _app.CurrentSettings.DeviceHotkeys[item.Target] = new DeviceHotkeyBinding
+                    {
+                        Target = item.Target,
+                        DeviceName = item.Name,
+                        IsUsb = false,
+                        IsBluetooth = true,
+                        Modifiers = ModifierKeys.Control | ModifierKeys.Alt,
+                        Key = Key.D3,
+                        Enabled = true
+                    };
+                    _app.ApplyAllHotkeys();
+                }
+
                 _app.CurrentSettings.Save();
                 UpdateHotkeyText();
             }
             else
             {
-                _tbIp.IsEnabled = true;
-                _tbPort.IsEnabled = true;
+                _isProgrammaticTextChange = true;
+                try
+                {
+                    if (item.IsUsb)
+                    {
+                        _tbIp.Text = item.Target;
+                        _tbPort.Text = "";
+                    }
+                    else
+                    {
+                        _tbIp.Text = item.Ip;
+                        _tbPort.Text = item.Port.ToString();
+                    }
+                }
+                finally { _isProgrammaticTextChange = false; }
+
+                _tbIp.IsEnabled = !item.IsUsb;
+                _tbPort.IsEnabled = !item.IsUsb;
+                _btnSwitchUsb.Visibility = item.IsUsb ? Visibility.Visible : Visibility.Collapsed;
+
                 _app.CurrentSettings.DeviceName = item.Name;
                 _app.CurrentSettings.Target = item.Target;
 
@@ -3464,17 +3689,6 @@ namespace WiFiAudioConnector
                 {
                     _app.CurrentSettings.DeviceIp = item.Ip;
                     _app.CurrentSettings.Port = item.Port;
-                    _tbIp.Text = item.Ip;
-                    _tbPort.Text = item.Port.ToString();
-                    _btnSwitchUsb.Visibility = Visibility.Collapsed;
-                }
-                else if (item.IsUsb)
-                {
-                    _btnSwitchUsb.Visibility = Visibility.Visible;
-                }
-                else
-                {
-                    _btnSwitchUsb.Visibility = Visibility.Collapsed;
                 }
 
                 _app.CurrentSettings.Save();
@@ -3493,10 +3707,13 @@ namespace WiFiAudioConnector
                     if (_app.IsBluetoothConnected)
                     {
                         desc = "已连接 (蓝牙 A2DP 直通)";
+                        UpdateScrcpyControlsState(true, false);
                     }
                     else
                     {
                         desc = _app.CurrentSettings.Codec == "raw" ? "已连接 (Raw PCM 无损)" : "已连接 (Opus)";
+                        bool isUsb = !string.IsNullOrEmpty(_app.CurrentSettings.Target) && !_app.CurrentSettings.Target.Contains(":");
+                        UpdateScrcpyControlsState(false, isUsb);
                     }
                     _statusText.Text = desc;
                     _btnConnect.Content = "断开连接";
@@ -3515,6 +3732,12 @@ namespace WiFiAudioConnector
                     _statusText.Text = "未连接";
                     _btnConnect.Content = "一键连接";
                     _btnConnect.Background = new SolidColorBrush(Color.FromArgb(255, 20, 120, 240));
+
+                    var sel = _cbDevices != null ? _cbDevices.SelectedItem as DeviceItem : null;
+                    if (sel != null)
+                    {
+                        UpdateScrcpyControlsState(sel.IsBluetooth, sel.IsUsb);
+                    }
                 }
             };
 
@@ -3533,12 +3756,35 @@ namespace WiFiAudioConnector
                         if (_deviceList[i].Target == _app.CurrentSettings.Target)
                         {
                             _cbDevices.SelectedIndex = i;
+                            UpdateScrcpyControlsState(_deviceList[i].IsBluetooth, _deviceList[i].IsUsb);
                             break;
                         }
                     }
                 }
-                if (_tbIp != null) _tbIp.Text = _app.CurrentSettings.DeviceIp;
-                if (_tbPort != null) _tbPort.Text = _app.CurrentSettings.Port.ToString();
+
+                _isProgrammaticTextChange = true;
+                try
+                {
+                    bool isBt = _app.IsBluetoothConnected || (_app.CurrentSettings.Target != null && (_app.CurrentSettings.Target.StartsWith(@"\\?\BTHENUM", StringComparison.OrdinalIgnoreCase) || _app.CurrentSettings.Target.StartsWith("Bluetooth#", StringComparison.OrdinalIgnoreCase)));
+                    if (isBt)
+                    {
+                        if (_tbIp != null) _tbIp.Text = "Bluetooth A2DP";
+                        if (_tbPort != null) _tbPort.Text = "";
+                        UpdateScrcpyControlsState(true, false);
+                    }
+                    else
+                    {
+                        bool isUsb = !string.IsNullOrEmpty(_app.CurrentSettings.Target) && !_app.CurrentSettings.Target.Contains(":");
+                        if (_tbIp != null) _tbIp.Text = isUsb ? _app.CurrentSettings.Target : _app.CurrentSettings.DeviceIp;
+                        if (_tbPort != null) _tbPort.Text = isUsb ? "" : _app.CurrentSettings.Port.ToString();
+                        UpdateScrcpyControlsState(false, isUsb);
+                    }
+                }
+                finally
+                {
+                    _isProgrammaticTextChange = false;
+                }
+
                 UpdateHotkeyText();
             };
             if (CheckAccess()) act();
