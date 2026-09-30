@@ -35,6 +35,10 @@ using MouseButtonEventArgs = System.Windows.Input.MouseButtonEventArgs;
 using Keyboard = System.Windows.Input.Keyboard;
 using KeyInterop = System.Windows.Input.KeyInterop;
 using Orientation = System.Windows.Controls.Orientation;
+using System.Windows.Interop;
+using System.Windows.Media.Animation;
+using System.Windows.Threading;
+using LinearGradientBrush = System.Windows.Media.LinearGradientBrush;
 
 namespace WiFiAudioConnector
 {
@@ -516,6 +520,10 @@ namespace WiFiAudioConnector
     public class TrayWheelVolumeController : IDisposable
     {
         private const int WH_MOUSE_LL = 14;
+        private const int WM_MOUSEMOVE = 0x0200;
+        private const int WM_LBUTTONDOWN = 0x0201;
+        private const int WM_RBUTTONDOWN = 0x0204;
+        private const int WM_MBUTTONDOWN = 0x0207;
         private const int WM_MOUSEWHEEL = 0x020A;
 
         private delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
@@ -565,8 +573,9 @@ namespace WiFiAudioConnector
         [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
         private static extern IntPtr GetModuleHandle(string lpModuleName);
 
-        private DateTime _lastMouseMoveTime = DateTime.MinValue;
+        private DateTime _lastHoverTime = DateTime.MinValue;
         private System.Drawing.Point _lastMousePos = System.Drawing.Point.Empty;
+        private bool _isHoveringIcon = false;
 
         public TrayWheelVolumeController(NotifyIcon notifyIcon, Action<int> onVolumeDelta)
         {
@@ -575,8 +584,9 @@ namespace WiFiAudioConnector
 
             _notifyIcon.MouseMove += (s, e) =>
             {
-                _lastMouseMoveTime = DateTime.Now;
+                _lastHoverTime = DateTime.Now;
                 _lastMousePos = System.Windows.Forms.Cursor.Position;
+                _isHoveringIcon = true;
             };
 
             _proc = HookCallback;
@@ -616,33 +626,64 @@ namespace WiFiAudioConnector
 
         private IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
         {
-            if (nCode >= 0 && (int)wParam == WM_MOUSEWHEEL)
+            if (nCode >= 0)
             {
-                MSLLHOOKSTRUCT hookStruct = (MSLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(MSLLHOOKSTRUCT));
-                bool isOverIcon = false;
-
-                var rect = GetIconRect();
-                if (!rect.IsEmpty && rect.Contains(hookStruct.pt.x, hookStruct.pt.y))
+                int msg = (int)wParam;
+                if (msg == WM_MOUSEMOVE)
                 {
-                    isOverIcon = true;
+                    if (_isHoveringIcon)
+                    {
+                        MSLLHOOKSTRUCT hookStruct = (MSLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(MSLLHOOKSTRUCT));
+                        int dx = Math.Abs(hookStruct.pt.x - _lastMousePos.X);
+                        int dy = Math.Abs(hookStruct.pt.y - _lastMousePos.Y);
+                        if (dx > 38 || dy > 38)
+                        {
+                            _isHoveringIcon = false;
+                        }
+                    }
                 }
-                else if ((DateTime.Now - _lastMouseMoveTime).TotalMilliseconds < 800)
+                else if (msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN || msg == WM_MBUTTONDOWN)
                 {
-                    if (Math.Abs(hookStruct.pt.x - _lastMousePos.X) <= 24 && Math.Abs(hookStruct.pt.y - _lastMousePos.Y) <= 24)
+                    MSLLHOOKSTRUCT hookStruct = (MSLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(MSLLHOOKSTRUCT));
+                    int dx = Math.Abs(hookStruct.pt.x - _lastMousePos.X);
+                    int dy = Math.Abs(hookStruct.pt.y - _lastMousePos.Y);
+                    if (dx > 38 || dy > 38)
+                    {
+                        _isHoveringIcon = false;
+                    }
+                }
+                else if (msg == WM_MOUSEWHEEL)
+                {
+                    MSLLHOOKSTRUCT hookStruct = (MSLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(MSLLHOOKSTRUCT));
+                    bool isOverIcon = false;
+
+                    var rect = GetIconRect();
+                    if (!rect.IsEmpty && rect.Contains(hookStruct.pt.x, hookStruct.pt.y))
                     {
                         isOverIcon = true;
                     }
-                }
-
-                if (isOverIcon)
-                {
-                    short delta = (short)((hookStruct.mouseData >> 16) & 0xffff);
-                    int step = (delta > 0) ? 4 : -4;
-                    if (_onVolumeDelta != null)
+                    else if (_isHoveringIcon)
                     {
-                        _onVolumeDelta(step);
+                        int dx = Math.Abs(hookStruct.pt.x - _lastMousePos.X);
+                        int dy = Math.Abs(hookStruct.pt.y - _lastMousePos.Y);
+                        if (dx <= 38 && dy <= 38 && (DateTime.Now - _lastHoverTime).TotalSeconds < 15)
+                        {
+                            isOverIcon = true;
+                        }
                     }
-                    return (IntPtr)1;
+
+                    if (isOverIcon)
+                    {
+                        _lastHoverTime = DateTime.Now;
+                        _isHoveringIcon = true;
+                        short delta = (short)((hookStruct.mouseData >> 16) & 0xffff);
+                        int step = (delta > 0) ? 4 : -4;
+                        if (_onVolumeDelta != null)
+                        {
+                            _onVolumeDelta(step);
+                        }
+                        return (IntPtr)1;
+                    }
                 }
             }
             return CallNextHookEx(_hookId, nCode, wParam, lParam);
@@ -659,6 +700,246 @@ namespace WiFiAudioConnector
     }
     #endregion
 
+    #region Volume OSD Window (Electric Blue Floating Capsule)
+    public class VolumeOsdWindow : Window
+    {
+        private const int WS_EX_TOOLWINDOW = 0x00000080;
+        private const int WS_EX_NOACTIVATE = 0x08000000;
+        private const int GWL_EXSTYLE = -20;
+
+        [DllImport("user32.dll", EntryPoint = "GetWindowLong")]
+        private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+
+        [DllImport("user32.dll", EntryPoint = "SetWindowLong")]
+        private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+
+        private TextBlock _iconText;
+        private TextBlock _volText;
+        private TextBlock _tagText;
+        private Border _trackBorder;
+        private Border _fillBorder;
+        private TextBlock _hintText;
+        private StackPanel _volumeContent;
+        private DispatcherTimer _fadeTimer;
+
+        public VolumeOsdWindow()
+        {
+            Width = 210;
+            Height = 56;
+            WindowStyle = WindowStyle.None;
+            AllowsTransparency = true;
+            Background = System.Windows.Media.Brushes.Transparent;
+            Topmost = true;
+            ShowInTaskbar = false;
+            Focusable = false;
+
+            BuildUI();
+
+            _fadeTimer = new DispatcherTimer();
+            _fadeTimer.Interval = TimeSpan.FromMilliseconds(1000);
+            _fadeTimer.Tick += OnFadeTimerTick;
+        }
+
+        protected override void OnSourceInitialized(EventArgs e)
+        {
+            base.OnSourceInitialized(e);
+            try
+            {
+                var hwnd = new WindowInteropHelper(this).Handle;
+                int exStyle = GetWindowLong(hwnd, GWL_EXSTYLE);
+                SetWindowLong(hwnd, GWL_EXSTYLE, exStyle | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE);
+            }
+            catch { }
+        }
+
+        private void BuildUI()
+        {
+            var capsuleBorder = new Border
+            {
+                CornerRadius = new CornerRadius(24),
+                Background = new SolidColorBrush(Color.FromArgb(235, 15, 23, 42)),
+                BorderBrush = new LinearGradientBrush(
+                    Color.FromArgb(255, 56, 189, 248),
+                    Color.FromArgb(255, 37, 99, 235),
+                    new System.Windows.Point(0, 0),
+                    new System.Windows.Point(1, 1)),
+                BorderThickness = new Thickness(1.8),
+                Padding = new Thickness(14, 8, 16, 8),
+                Effect = new DropShadowEffect
+                {
+                    BlurRadius = 18,
+                    ShadowDepth = 2,
+                    Opacity = 0.55,
+                    Color = Color.FromRgb(56, 189, 248)
+                }
+            };
+
+            var rootDock = new DockPanel();
+
+            _iconText = new TextBlock
+            {
+                Text = "🔊",
+                FontSize = 20,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 10, 0)
+            };
+            DockPanel.SetDock(_iconText, Dock.Left);
+            rootDock.Children.Add(_iconText);
+
+            var rightStack = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
+
+            // Volume Content
+            _volumeContent = new StackPanel();
+
+            var topRow = new DockPanel { Margin = new Thickness(0, 0, 0, 4) };
+            _volText = new TextBlock
+            {
+                Text = "100%",
+                FontSize = 15,
+                FontWeight = FontWeights.Bold,
+                Foreground = new SolidColorBrush(Color.FromRgb(56, 189, 248)),
+                FontFamily = new FontFamily("Segoe UI, Microsoft YaHei UI")
+            };
+            DockPanel.SetDock(_volText, Dock.Left);
+            topRow.Children.Add(_volText);
+
+            _tagText = new TextBlock
+            {
+                Text = "Wi-Fi 直通",
+                FontSize = 10,
+                Foreground = new SolidColorBrush(Color.FromArgb(180, 148, 163, 184)),
+                HorizontalAlignment = HorizontalAlignment.Right,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(6, 2, 0, 0)
+            };
+            DockPanel.SetDock(_tagText, Dock.Right);
+            topRow.Children.Add(_tagText);
+            _volumeContent.Children.Add(topRow);
+
+            _trackBorder = new Border
+            {
+                Width = 120,
+                Height = 4.5,
+                CornerRadius = new CornerRadius(2.25),
+                Background = new SolidColorBrush(Color.FromArgb(120, 51, 65, 85)),
+                HorizontalAlignment = HorizontalAlignment.Left
+            };
+            _fillBorder = new Border
+            {
+                Height = 4.5,
+                Width = 120,
+                CornerRadius = new CornerRadius(2.25),
+                Background = new LinearGradientBrush(
+                    Color.FromRgb(56, 189, 248),
+                    Color.FromRgb(59, 130, 246),
+                    0.0),
+                HorizontalAlignment = HorizontalAlignment.Left
+            };
+            _trackBorder.Child = _fillBorder;
+            _volumeContent.Children.Add(_trackBorder);
+            rightStack.Children.Add(_volumeContent);
+
+            // Hint Text
+            _hintText = new TextBlock
+            {
+                Text = "",
+                FontSize = 10.5,
+                Foreground = new SolidColorBrush(Color.FromRgb(147, 197, 253)),
+                FontFamily = new FontFamily("Microsoft YaHei UI, Segoe UI"),
+                TextWrapping = TextWrapping.Wrap,
+                Visibility = Visibility.Collapsed
+            };
+            rightStack.Children.Add(_hintText);
+
+            rootDock.Children.Add(rightStack);
+            capsuleBorder.Child = rootDock;
+            Content = capsuleBorder;
+        }
+
+        private void PositionBottomRight()
+        {
+            var workArea = SystemParameters.WorkArea;
+            Left = workArea.Right - Width - 24;
+            Top = workArea.Bottom - Height - 24;
+        }
+
+        public void ShowVolume(int volumePercent, bool isMuted, string tag)
+        {
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                _volumeContent.Visibility = Visibility.Visible;
+                _hintText.Visibility = Visibility.Collapsed;
+
+                if (isMuted)
+                {
+                    _iconText.Text = "🔇";
+                    _volText.Text = "静音";
+                    _fillBorder.Width = 0;
+                }
+                else
+                {
+                    if (volumePercent == 0) _iconText.Text = "🔈";
+                    else if (volumePercent < 50) _iconText.Text = "🔉";
+                    else _iconText.Text = "🔊";
+
+                    _volText.Text = volumePercent + "%";
+                    _fillBorder.Width = Math.Max(0, Math.Min(120, (volumePercent / 100.0) * 120.0));
+                }
+
+                _tagText.Text = tag ?? "";
+
+                PositionBottomRight();
+
+                BeginAnimation(OpacityProperty, null);
+                Opacity = 1.0;
+
+                if (!IsVisible) Show();
+
+                _fadeTimer.Stop();
+                _fadeTimer.Start();
+            }));
+        }
+
+        public void ShowHint(string title, string hint)
+        {
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                _volumeContent.Visibility = Visibility.Collapsed;
+                _hintText.Visibility = Visibility.Visible;
+                _hintText.Text = hint;
+                _iconText.Text = "ℹ️";
+
+                PositionBottomRight();
+
+                BeginAnimation(OpacityProperty, null);
+                Opacity = 1.0;
+
+                if (!IsVisible) Show();
+
+                _fadeTimer.Stop();
+                _fadeTimer.Start();
+            }));
+        }
+
+        private void OnFadeTimerTick(object sender, EventArgs e)
+        {
+            _fadeTimer.Stop();
+            var anim = new DoubleAnimation(1.0, 0.0, new Duration(TimeSpan.FromMilliseconds(250)))
+            {
+                EasingFunction = new QuadraticEase { EasingMode = EasingMode.EaseOut }
+            };
+            anim.Completed += (s, args) =>
+            {
+                if (Opacity == 0.0)
+                {
+                    Hide();
+                }
+            };
+            BeginAnimation(OpacityProperty, anim);
+        }
+    }
+    #endregion
+
     public class Settings
     {
         public string DeviceName = "Xiaomi 15 Pro";
@@ -666,6 +947,7 @@ namespace WiFiAudioConnector
         public int Port = 5555;
         public string Target = "192.168.31.239:5555";
         public string Codec = "raw"; // "raw", "opus320", "opus128"
+        public string LatencyMode = "balanced"; // "game", "balanced", "smooth"
         public bool MutePhone = true;
         public bool AutoConnect = true;
         public bool ShowNotifications = true;
@@ -695,6 +977,7 @@ namespace WiFiAudioConnector
                 sb.AppendLine("Port=" + Port);
                 sb.AppendLine("Target=" + Target);
                 sb.AppendLine("Codec=" + Codec);
+                sb.AppendLine("LatencyMode=" + LatencyMode);
                 sb.AppendLine("MutePhone=" + (MutePhone ? "1" : "0"));
                 sb.AppendLine("AutoConnect=" + (AutoConnect ? "1" : "0"));
                 sb.AppendLine("ShowNotifications=" + (ShowNotifications ? "1" : "0"));
@@ -745,6 +1028,7 @@ namespace WiFiAudioConnector
                             else if (k == "Port") int.TryParse(v, out s.Port);
                             else if (k == "Target") s.Target = v;
                             else if (k == "Codec") s.Codec = v;
+                            else if (k == "LatencyMode") s.LatencyMode = v;
                             else if (k == "MutePhone") s.MutePhone = (v == "1");
                             else if (k == "AutoConnect") s.AutoConnect = (v == "1");
                             else if (k == "ShowNotifications") s.ShowNotifications = (v != "0");
@@ -1617,6 +1901,7 @@ namespace WiFiAudioConnector
         private HotkeyConfigWindow _hotkeyWin = null;
         private ToolStripMenuItem _notifyMenuItem = null;
         private TrayWheelVolumeController _trayWheelController = null;
+        private VolumeOsdWindow _volumeOsd = null;
         private Process _logcatProc = null;
         private int _phoneMaxVolume = 150;
         private DateTime _lastSliderSetTime = DateTime.MinValue;
@@ -1643,20 +1928,27 @@ namespace WiFiAudioConnector
         {
             try
             {
+                LogLine("Main entered");
                 bool createdNew;
                 _mutex = new Mutex(true, "WiFiAudioConnector_Universal_Mutex", out createdNew);
+                LogLine("Mutex createdNew: " + createdNew);
                 if (!createdNew)
                 {
+                    LogLine("Exiting because not createdNew");
                     MessageBox.Show("WiFi 音频连接器已经在后台运行中！\n请查看桌面右下角系统托盘图标。", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
                     return;
                 }
 
+                LogLine("Creating App instance");
                 var app = new App();
                 app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+                LogLine("Calling app.Run()");
                 app.Run();
+                LogLine("app.Run() returned");
             }
             catch (Exception ex)
             {
+                LogLine("Main Exception: " + ex);
                 File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "crash.log"), ex.ToString());
             }
         }
@@ -1675,10 +1967,16 @@ namespace WiFiAudioConnector
                 LogLine("DispatcherUnhandledException: " + ev.Exception);
             };
 
+            LogLine("OnStartup entered");
             try
             {
+                LogLine("Loading settings");
                 _settings = Settings.Load();
+                LogLine("Creating VolumeOsdWindow");
+                _volumeOsd = new VolumeOsdWindow();
+                LogLine("InitTrayIcon");
                 InitTrayIcon();
+                LogLine("InitHotkey");
                 InitHotkey();
                 _btConnector.ConnectionLost += () =>
                 {
@@ -1691,16 +1989,21 @@ namespace WiFiAudioConnector
                         }
                     }));
                 };
+                LogLine("Creating FlyoutWindow");
                 _flyout = new FlyoutWindow(this);
                 MainWindow = _flyout;
+                LogLine("FlyoutWindow initialized");
 
                 if (_settings.AutoConnect)
                 {
+                    LogLine("AutoConnect starting");
                     ConnectAsync();
                 }
+                LogLine("OnStartup completed");
             }
             catch (Exception ex)
             {
+                LogLine("OnStartup Exception: " + ex);
                 File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "crash.log"), ex.ToString());
             }
         }
@@ -1762,20 +2065,50 @@ namespace WiFiAudioConnector
 
         private void OnTrayWheelVolumeDelta(int delta)
         {
-            if (!IsConnected || _isBluetoothConnected || _scrcpyProc == null || _scrcpyProc.HasExited)
-            {
-                return;
-            }
             Dispatcher.BeginInvoke(new Action(() =>
             {
+                if (_isBluetoothConnected)
+                {
+                    if (_volumeOsd != null)
+                    {
+                        _volumeOsd.ShowHint("蓝牙直通模式", "蓝牙模式请直接在手机端调节音量");
+                    }
+                    return;
+                }
+
                 int cur = _settings.MasterVolume;
                 int newVol = Math.Max(0, Math.Min(100, cur + delta));
-                SetVolumeFromUI(newVol, false);
-                if (_flyout != null)
+
+                if (IsConnected && _scrcpyProc != null && !_scrcpyProc.HasExited)
                 {
-                    _flyout.UpdateVolumeUI(newVol, false);
+                    SetVolumeFromUI(newVol, false);
+                    if (_flyout != null)
+                    {
+                        _flyout.UpdateVolumeUI(newVol, false);
+                    }
+                    _notifyIcon.Text = string.Format("WiFi 音频连接器 - 音量: {0}% (已连接)", newVol);
+                    if (_volumeOsd != null)
+                    {
+                        bool isUsb = !string.IsNullOrEmpty(_currentActiveTarget) && !_currentActiveTarget.Contains(":");
+                        string modeTag = isUsb ? "USB 有线" : "Wi-Fi 直通";
+                        _volumeOsd.ShowVolume(newVol, false, modeTag);
+                    }
                 }
-                _notifyIcon.Text = string.Format("WiFi 音频连接器 - 音量: {0}% (已连接)", newVol);
+                else
+                {
+                    _settings.MasterVolume = newVol;
+                    _settings.IsMuted = false;
+                    _settings.Save();
+                    if (_flyout != null)
+                    {
+                        _flyout.UpdateVolumeUI(newVol, false);
+                    }
+                    _notifyIcon.Text = string.Format("WiFi 音频连接器 - 音量: {0}% (未连接)", newVol);
+                    if (_volumeOsd != null)
+                    {
+                        _volumeOsd.ShowVolume(newVol, false, "预设音量 (未连接)");
+                    }
+                }
             }));
         }
 
@@ -2204,8 +2537,22 @@ namespace WiFiAudioConnector
                     if (_settings.Codec == "opus320") codecArg = "--audio-codec=opus --audio-bit-rate=320K";
                     else if (_settings.Codec == "opus128") codecArg = "--audio-codec=opus --audio-bit-rate=128K";
 
+                    int bufferMs = 50;
+                    if (_settings.LatencyMode == "game")
+                    {
+                        bufferMs = isTcp ? 30 : 10;
+                    }
+                    else if (_settings.LatencyMode == "smooth")
+                    {
+                        bufferMs = 80;
+                    }
+                    else
+                    {
+                        bufferMs = 50;
+                    }
+
                     string modeArg = _settings.MutePhone ? "--audio-source=playback" : "--audio-source=playback --audio-dup";
-                    string scrcpyArgs = string.Format("-s {0} --no-video --no-window {1} {2} --audio-buffer=50", target, codecArg, modeArg);
+                    string scrcpyArgs = string.Format("-s {0} --no-video --no-window {1} {2} --audio-buffer={3}", target, codecArg, modeArg, bufferMs);
 
                     var psiScrcpy = new ProcessStartInfo
                     {
@@ -2236,8 +2583,9 @@ namespace WiFiAudioConnector
                 UpdateTrayIcon(true);
                 string desc = _settings.Codec == "raw" ? "Raw PCM 无损" : "Opus 320K";
                 string modeTag = isTcp ? "Wi-Fi 无线" : "USB 有线";
+                int curBuffer = (_settings.LatencyMode == "game") ? (isTcp ? 30 : 10) : ((_settings.LatencyMode == "smooth") ? 80 : 50);
                 _notifyIcon.Text = string.Format("WiFi 音频连接器 - {0} [{1}] (已连接)", _settings.DeviceName, modeTag);
-                ShowNotification("设备已连接", string.Format("{0} [{1}]\n音频流已就绪 ({2})，直通电脑播放", _settings.DeviceName, modeTag, desc), ToolTipIcon.Info);
+                ShowNotification("设备已连接", string.Format("{0} [{1}]\n音频流已就绪 ({2}, {3}ms 缓冲)，直通电脑播放", _settings.DeviceName, modeTag, desc, curBuffer), ToolTipIcon.Info);
                 _flyout.UpdateState(ConnectionState.Connected);
                 StartPhoneVolumeSync(target, _scrcpyProc.Id);
 
@@ -2805,6 +3153,11 @@ namespace WiFiAudioConnector
                 _trayWheelController.Dispose();
                 _trayWheelController = null;
             }
+            if (_volumeOsd != null)
+            {
+                _volumeOsd.Close();
+                _volumeOsd = null;
+            }
             if (_hotkeyManager != null)
             {
                 _hotkeyManager.Dispose();
@@ -2838,6 +3191,9 @@ namespace WiFiAudioConnector
         private RadioButton _rbRaw;
         private RadioButton _rbOpus320;
         private RadioButton _rbOpus128;
+        private RadioButton _rbLatencyGame;
+        private RadioButton _rbLatencyBalanced;
+        private RadioButton _rbLatencySmooth;
         private CheckBox _cbMutePhone;
         private CheckBox _cbAutoConnect;
         private CheckBox _cbNotifications;
@@ -2871,7 +3227,7 @@ namespace WiFiAudioConnector
         private void BuildUI()
         {
             Width = 370;
-            Height = 650;
+            Height = 730;
             WindowStyle = WindowStyle.None;
             AllowsTransparency = true;
             Background = System.Windows.Media.Brushes.Transparent;
@@ -3301,7 +3657,7 @@ namespace WiFiAudioConnector
             _volumeCard.Child = volumePanel;
             root.Children.Add(_volumeCard);
 
-            // Audio Quality Settings Card
+            // Audio Quality & Latency Settings Card
             _qualityCard = new Border
             {
                 Background = new SolidColorBrush(Color.FromArgb(160, 42, 45, 54)),
@@ -3321,6 +3677,7 @@ namespace WiFiAudioConnector
 
             _rbRaw = new RadioButton
             {
+                GroupName = "CodecGroup",
                 Content = "Raw PCM (16-bit 48kHz 原生无损直通 - 推荐)",
                 Foreground = System.Windows.Media.Brushes.White,
                 FontSize = 11,
@@ -3332,6 +3689,7 @@ namespace WiFiAudioConnector
 
             _rbOpus320 = new RadioButton
             {
+                GroupName = "CodecGroup",
                 Content = "Opus 320K (高码率广播级，极低带宽占用)",
                 Foreground = System.Windows.Media.Brushes.White,
                 FontSize = 11,
@@ -3343,6 +3701,7 @@ namespace WiFiAudioConnector
 
             _rbOpus128 = new RadioButton
             {
+                GroupName = "CodecGroup",
                 Content = "Opus 128K (极限低延迟与省电)",
                 Foreground = System.Windows.Media.Brushes.White,
                 FontSize = 11,
@@ -3351,6 +3710,57 @@ namespace WiFiAudioConnector
             };
             _rbOpus128.Checked += (s, e) => { _app.CurrentSettings.Codec = "opus128"; _app.CurrentSettings.Save(); };
             qualityPanel.Children.Add(_rbOpus128);
+
+            qualityPanel.Children.Add(new Separator
+            {
+                Margin = new Thickness(0, 7, 0, 7),
+                Background = new SolidColorBrush(Color.FromArgb(40, 255, 255, 255))
+            });
+
+            qualityPanel.Children.Add(new TextBlock
+            {
+                Text = "音频缓冲延迟档位",
+                FontSize = 12,
+                FontWeight = FontWeights.Bold,
+                Foreground = System.Windows.Media.Brushes.White,
+                Margin = new Thickness(0, 0, 0, 6)
+            });
+
+            _rbLatencyGame = new RadioButton
+            {
+                GroupName = "LatencyGroup",
+                Content = "⚡ 电竞极速档 (Wi-Fi 30ms / USB 10ms - 音画近乎完全同步)",
+                Foreground = System.Windows.Media.Brushes.White,
+                FontSize = 11,
+                Margin = new Thickness(0, 2, 0, 4),
+                IsChecked = (_app.CurrentSettings.LatencyMode == "game")
+            };
+            _rbLatencyGame.Checked += (s, e) => { _app.CurrentSettings.LatencyMode = "game"; _app.CurrentSettings.Save(); };
+            qualityPanel.Children.Add(_rbLatencyGame);
+
+            _rbLatencyBalanced = new RadioButton
+            {
+                GroupName = "LatencyGroup",
+                Content = "⚖ 均衡模式 (50ms - 兼顾流畅与抗波动 - 推荐默认)",
+                Foreground = System.Windows.Media.Brushes.White,
+                FontSize = 11,
+                Margin = new Thickness(0, 2, 0, 4),
+                IsChecked = (_app.CurrentSettings.LatencyMode == "balanced" || string.IsNullOrEmpty(_app.CurrentSettings.LatencyMode))
+            };
+            _rbLatencyBalanced.Checked += (s, e) => { _app.CurrentSettings.LatencyMode = "balanced"; _app.CurrentSettings.Save(); };
+            qualityPanel.Children.Add(_rbLatencyBalanced);
+
+            _rbLatencySmooth = new RadioButton
+            {
+                GroupName = "LatencyGroup",
+                Content = "🛡 穿墙防卡顿档 (80ms - 针对 2.4G Wi-Fi 与弱网环境)",
+                Foreground = System.Windows.Media.Brushes.White,
+                FontSize = 11,
+                Margin = new Thickness(0, 2, 0, 2),
+                IsChecked = (_app.CurrentSettings.LatencyMode == "smooth")
+            };
+            _rbLatencySmooth.Checked += (s, e) => { _app.CurrentSettings.LatencyMode = "smooth"; _app.CurrentSettings.Save(); };
+            qualityPanel.Children.Add(_rbLatencySmooth);
 
             _qualityCard.Child = qualityPanel;
             root.Children.Add(_qualityCard);
