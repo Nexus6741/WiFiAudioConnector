@@ -28,6 +28,7 @@ using TextBox = System.Windows.Controls.TextBox;
 using ListBox = System.Windows.Controls.ListBox;
 using Key = System.Windows.Input.Key;
 using ModifierKeys = System.Windows.Input.ModifierKeys;
+using XamlReader = System.Windows.Markup.XamlReader;
 using KeyEventArgs = System.Windows.Input.KeyEventArgs;
 using MouseEventArgs = System.Windows.Forms.MouseEventArgs;
 using MouseButton = System.Windows.Input.MouseButton;
@@ -52,12 +53,52 @@ namespace WiFiAudioConnector
         public bool IsBluetooth { get; set; }
         public bool IsCustom { get; set; }
 
+        public string ModeIcon
+        {
+            get
+            {
+                if (IsCustom) return "➕";
+                if (IsBluetooth) return "\uE702";
+                if (IsUsb) return "🔌";
+                return "\uE701";
+            }
+        }
+
+        public string ModeIconFont
+        {
+            get
+            {
+                if (IsBluetooth || (!IsCustom && !IsUsb)) return "Segoe MDL2 Assets";
+                return "Segoe UI Emoji";
+            }
+        }
+
+        public System.Windows.Media.Brush ModeIconBrush
+        {
+            get
+            {
+                if (IsBluetooth || (!IsCustom && !IsUsb)) return new SolidColorBrush(System.Windows.Media.Color.FromRgb(37, 99, 235));
+                return System.Windows.Media.Brushes.DimGray;
+            }
+        }
+
+        public string DisplayText
+        {
+            get
+            {
+                if (IsCustom) return "手动输入设备 IP / 端口...";
+                if (IsBluetooth) return string.Format("[蓝牙] {0}", Name);
+                if (IsUsb) return string.Format("[USB] {0}", Name);
+                return string.Format("{0} ({1}:{2})", Name, Ip, Port);
+            }
+        }
+
         public override string ToString()
         {
             if (IsCustom) return "➕ 手动输入设备 IP / 端口...";
-            if (IsBluetooth) return string.Format("🎧 [蓝牙] {0}", Name);
+            if (IsBluetooth) return string.Format("\uE702 [蓝牙] {0}", Name);
             if (IsUsb) return string.Format("🔌 [USB] {0}", Name);
-            return string.Format("📶 {0} ({1}:{2})", Name, Ip, Port);
+            return string.Format("\uE701 {0} ({1}:{2})", Name, Ip, Port);
         }
     }
 
@@ -96,13 +137,48 @@ namespace WiFiAudioConnector
             }
         }
 
+        public string ModeIcon
+        {
+            get
+            {
+                if (IsBluetooth) return "\uE702";
+                if (IsUsb) return "🔌";
+                return "\uE701";
+            }
+        }
+
+        public string ModeIconFont
+        {
+            get
+            {
+                if (IsBluetooth || !IsUsb) return "Segoe MDL2 Assets";
+                return "Segoe UI Emoji";
+            }
+        }
+
+        public System.Windows.Media.Brush ModeIconBrush
+        {
+            get
+            {
+                if (IsBluetooth || !IsUsb) return new SolidColorBrush(System.Windows.Media.Color.FromRgb(59, 130, 246));
+                return System.Windows.Media.Brushes.LightGray;
+            }
+        }
+
+        public string DisplayDetail
+        {
+            get
+            {
+                string modeTag = IsBluetooth ? "蓝牙 A2DP" : (IsUsb ? "USB 有线" : "Wi-Fi 无线");
+                string hkTag = Enabled && Key != Key.None ? HotkeyManager.FormatHotkey(Modifiers, Key) : "未设置";
+                string displayTarget = IsBluetooth ? "蓝牙原生配对" : Target;
+                return string.Format("{0} [{1}]  ({2})   ▶   快捷键: {3}", DeviceName, modeTag, displayTarget, hkTag);
+            }
+        }
+
         public override string ToString()
         {
-            string modeIcon = IsBluetooth ? "🎧" : (IsUsb ? "🔌" : "📶");
-            string modeTag = IsBluetooth ? "蓝牙 A2DP" : (IsUsb ? "USB 有线" : "Wi-Fi 无线");
-            string hkTag = Enabled && Key != Key.None ? HotkeyManager.FormatHotkey(Modifiers, Key) : "未设置";
-            string displayTarget = IsBluetooth ? "蓝牙原生配对" : Target;
-            return string.Format("{0}  {1} [{2}]  ({3})   ▶   快捷键: {4}", modeIcon, DeviceName, modeTag, displayTarget, hkTag);
+            return string.Format("{0}  {1}", ModeIcon, DisplayDetail);
         }
     }
 
@@ -1650,6 +1726,14 @@ namespace WiFiAudioConnector
                 Padding = new Thickness(4),
                 ItemsSource = _bindingsList
             };
+            string lbTemplateXaml = @"
+                <DataTemplate xmlns=""http://schemas.microsoft.com/winfx/2006/xaml/presentation"">
+                    <DockPanel LastChildFill=""True"" Margin=""2"">
+                        <TextBlock Text=""{Binding ModeIcon}"" FontFamily=""{Binding ModeIconFont}"" Foreground=""{Binding ModeIconBrush}"" FontSize=""12"" VerticalAlignment=""Center"" Margin=""0,0,8,0"" Width=""16"" TextAlignment=""Center""/>
+                        <TextBlock Text=""{Binding DisplayDetail}"" FontFamily=""Microsoft YaHei UI, Consolas, Segoe UI"" Foreground=""#FFFFFF"" FontSize=""11"" VerticalAlignment=""Center""/>
+                    </DockPanel>
+                </DataTemplate>";
+            _lbDevices.ItemTemplate = (DataTemplate)XamlReader.Parse(lbTemplateXaml);
             _lbDevices.SelectionChanged += (s, e) => OnDeviceSelected();
             listCardPanel.Children.Add(_lbDevices);
             listCard.Child = listCardPanel;
@@ -2091,7 +2175,7 @@ namespace WiFiAudioConnector
 
         private CancellationTokenSource _batteryCts = null;
         private BatteryInfo _lastBatteryInfo = null;
-        public BatteryInfo LastBatteryInfo { get { return _lastBatteryInfo; } }
+        public BatteryInfo LastBatteryInfo { get { return _lastBatteryInfo; } set { _lastBatteryInfo = value; } }
         private bool _hasAlertedLowBattery = false;
 
         public static void LogLine(string s)
@@ -2947,22 +3031,7 @@ namespace WiFiAudioConnector
             if (_flyout != null)
             {
                 _flyout.SyncNotificationCheckbox();
-            }
-            if (IsConnected && !_isBluetoothConnected && !string.IsNullOrEmpty(_currentActiveTarget))
-            {
-                Task.Run(() =>
-                {
-                    var info = QueryPhoneBattery(_currentActiveTarget);
-                    if (info != null && info.Level >= 0)
-                    {
-                        _lastBatteryInfo = info;
-                        Dispatcher.BeginInvoke(new Action(() =>
-                        {
-                            if (_flyout != null) _flyout.UpdateBatteryUI(info);
-                            UpdateTrayTooltipWithBattery();
-                        }));
-                    }
-                });
+                _flyout.RefreshBatteryForSelectedDevice();
             }
             _flyout.Show();
             _flyout.Activate();
@@ -3473,7 +3542,13 @@ namespace WiFiAudioConnector
 
         public BatteryInfo QueryPhoneBattery(string target)
         {
-            if (string.IsNullOrEmpty(target) || _isBluetoothConnected) return null;
+            if (string.IsNullOrEmpty(target)) return null;
+            if (target.StartsWith(@"\\?\BTHENUM", StringComparison.OrdinalIgnoreCase) ||
+                target.StartsWith("Bluetooth#", StringComparison.OrdinalIgnoreCase) ||
+                target.IndexOf("Bluetooth", StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                return null;
+            }
             try
             {
                 string adbPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "adb.exe");
@@ -3896,6 +3971,14 @@ namespace WiFiAudioConnector
                 Background = new SolidColorBrush(Color.FromArgb(200, 25, 27, 32)),
                 Foreground = System.Windows.Media.Brushes.Black
             };
+            string cbTemplateXaml = @"
+                <DataTemplate xmlns=""http://schemas.microsoft.com/winfx/2006/xaml/presentation"">
+                    <DockPanel LastChildFill=""True"" Margin=""1"">
+                        <TextBlock Text=""{Binding ModeIcon}"" FontFamily=""{Binding ModeIconFont}"" Foreground=""{Binding ModeIconBrush}"" FontSize=""12"" VerticalAlignment=""Center"" Margin=""0,0,6,0"" Width=""16"" TextAlignment=""Center""/>
+                        <TextBlock Text=""{Binding DisplayText}"" FontFamily=""Microsoft YaHei UI, Segoe UI"" FontSize=""11"" VerticalAlignment=""Center""/>
+                    </DockPanel>
+                </DataTemplate>";
+            _cbDevices.ItemTemplate = (DataTemplate)XamlReader.Parse(cbTemplateXaml);
             _cbDevices.SelectionChanged += OnDeviceSelectionChanged;
 
             comboRow.Children.Add(_btnScan);
@@ -4569,6 +4652,7 @@ namespace WiFiAudioConnector
             if (curSel != null)
             {
                 UpdateScrcpyControlsState(curSel.IsBluetooth, curSel.IsUsb);
+                RefreshBatteryForSelectedDevice(curSel);
             }
 
             _btnScan.IsEnabled = true;
@@ -4609,6 +4693,7 @@ namespace WiFiAudioConnector
             if (item == null) return;
 
             UpdateScrcpyControlsState(item.IsBluetooth, item.IsUsb);
+            RefreshBatteryForSelectedDevice(item);
 
             if (item.IsCustom)
             {
@@ -4714,10 +4799,7 @@ namespace WiFiAudioConnector
                         desc = _app.CurrentSettings.Codec == "raw" ? "已连接 (Raw PCM 无损)" : "已连接 (Opus)";
                         bool isUsb = !string.IsNullOrEmpty(_app.CurrentSettings.Target) && !_app.CurrentSettings.Target.Contains(":");
                         UpdateScrcpyControlsState(false, isUsb);
-                        if (_batteryBadge != null && _app.LastBatteryInfo != null && _app.LastBatteryInfo.Level >= 0)
-                        {
-                            UpdateBatteryUI(_app.LastBatteryInfo);
-                        }
+                        RefreshBatteryForSelectedDevice();
                     }
                     _statusText.Text = desc;
                     _btnConnect.Content = "断开连接";
@@ -4737,12 +4819,16 @@ namespace WiFiAudioConnector
                     _statusText.Text = "未连接";
                     _btnConnect.Content = "一键连接";
                     _btnConnect.Background = new SolidColorBrush(Color.FromArgb(255, 20, 120, 240));
-                    if (_batteryBadge != null) _batteryBadge.Visibility = Visibility.Collapsed;
 
                     var sel = _cbDevices != null ? _cbDevices.SelectedItem as DeviceItem : null;
                     if (sel != null)
                     {
                         UpdateScrcpyControlsState(sel.IsBluetooth, sel.IsUsb);
+                        RefreshBatteryForSelectedDevice(sel);
+                    }
+                    else
+                    {
+                        if (_batteryBadge != null) _batteryBadge.Visibility = Visibility.Collapsed;
                     }
                 }
 
@@ -4780,12 +4866,64 @@ namespace WiFiAudioConnector
             return btn;
         }
 
+        public void RefreshBatteryForSelectedDevice(DeviceItem item = null)
+        {
+            if (item == null)
+            {
+                item = _cbDevices != null ? _cbDevices.SelectedItem as DeviceItem : null;
+            }
+
+            if (item == null || item.IsBluetooth || item.IsCustom || string.IsNullOrEmpty(item.Target))
+            {
+                if (_batteryBadge != null) _batteryBadge.Visibility = Visibility.Collapsed;
+                return;
+            }
+
+            if (_app.IsConnected && string.Equals(_app.CurrentActiveTarget, item.Target, StringComparison.OrdinalIgnoreCase) &&
+                _app.LastBatteryInfo != null && _app.LastBatteryInfo.Level >= 0)
+            {
+                UpdateBatteryUI(_app.LastBatteryInfo);
+            }
+
+            string queryTarget = item.Target;
+            Task.Run(() =>
+            {
+                var info = _app.QueryPhoneBattery(queryTarget);
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    var cur = _cbDevices != null ? _cbDevices.SelectedItem as DeviceItem : null;
+                    if (cur != null && string.Equals(cur.Target, queryTarget, StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (info != null && info.Level >= 0)
+                        {
+                            UpdateBatteryUI(info);
+                            if (_app.IsConnected && string.Equals(_app.CurrentActiveTarget, queryTarget, StringComparison.OrdinalIgnoreCase))
+                            {
+                                _app.LastBatteryInfo = info;
+                                _app.UpdateTrayTooltipWithBattery();
+                            }
+                        }
+                        else
+                        {
+                            if (_batteryBadge != null) _batteryBadge.Visibility = Visibility.Collapsed;
+                        }
+                    }
+                }));
+            });
+        }
+
         public void UpdateBatteryUI(BatteryInfo info)
         {
             Dispatcher.BeginInvoke(new Action(() =>
             {
                 if (_batteryBadge == null || _batteryText == null) return;
-                if (info == null || info.Level < 0 || !_app.IsConnected || _app.IsBluetoothConnected)
+                var cur = _cbDevices != null ? _cbDevices.SelectedItem as DeviceItem : null;
+                if (cur != null && (cur.IsBluetooth || cur.IsCustom || string.IsNullOrEmpty(cur.Target)))
+                {
+                    _batteryBadge.Visibility = Visibility.Collapsed;
+                    return;
+                }
+                if (info == null || info.Level < 0)
                 {
                     _batteryBadge.Visibility = Visibility.Collapsed;
                     return;
@@ -4836,6 +4974,7 @@ namespace WiFiAudioConnector
                         {
                             _cbDevices.SelectedIndex = i;
                             UpdateScrcpyControlsState(_deviceList[i].IsBluetooth, _deviceList[i].IsUsb);
+                            RefreshBatteryForSelectedDevice(_deviceList[i]);
                             break;
                         }
                     }
