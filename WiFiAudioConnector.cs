@@ -273,6 +273,153 @@ namespace WiFiAudioConnector
     }
     #endregion
 
+    #region Tray Wheel Volume Controller
+    public class TrayWheelVolumeController : IDisposable
+    {
+        private const int WH_MOUSE_LL = 14;
+        private const int WM_MOUSEWHEEL = 0x020A;
+
+        private delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
+        private LowLevelMouseProc _proc;
+        private IntPtr _hookId = IntPtr.Zero;
+        private NotifyIcon _notifyIcon;
+        private Action<int> _onVolumeDelta;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct POINT { public int x; public int y; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct MSLLHOOKSTRUCT
+        {
+            public POINT pt;
+            public uint mouseData;
+            public uint flags;
+            public uint time;
+            public IntPtr dwExtraInfo;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct RECT { public int left, top, right, bottom; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct NOTIFYICONIDENTIFIER
+        {
+            public int cbSize;
+            public IntPtr hWnd;
+            public int uID;
+            public Guid guidItem;
+        }
+
+        [DllImport("shell32.dll", SetLastError = true)]
+        private static extern int Shell_NotifyIconGetRect([In] ref NOTIFYICONIDENTIFIER identifier, [Out] out RECT iconLocation);
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelMouseProc lpfn, IntPtr hMod, uint dwThreadId);
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool UnhookWindowsHookEx(IntPtr hhk);
+
+        [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        private static extern IntPtr GetModuleHandle(string lpModuleName);
+
+        private DateTime _lastMouseMoveTime = DateTime.MinValue;
+        private System.Drawing.Point _lastMousePos = System.Drawing.Point.Empty;
+
+        public TrayWheelVolumeController(NotifyIcon notifyIcon, Action<int> onVolumeDelta)
+        {
+            _notifyIcon = notifyIcon;
+            _onVolumeDelta = onVolumeDelta;
+
+            _notifyIcon.MouseMove += (s, e) =>
+            {
+                _lastMouseMoveTime = DateTime.Now;
+                _lastMousePos = System.Windows.Forms.Cursor.Position;
+            };
+
+            _proc = HookCallback;
+            using (var curProc = Process.GetCurrentProcess())
+            using (var curMod = curProc.MainModule)
+            {
+                _hookId = SetWindowsHookEx(WH_MOUSE_LL, _proc, GetModuleHandle(curMod.ModuleName), 0);
+            }
+        }
+
+        private System.Drawing.Rectangle GetIconRect()
+        {
+            try
+            {
+                var windowField = typeof(NotifyIcon).GetField("window", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                var idField = typeof(NotifyIcon).GetField("id", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance);
+                if (windowField != null && idField != null)
+                {
+                    var window = (NativeWindow)windowField.GetValue(_notifyIcon);
+                    int id = (int)idField.GetValue(_notifyIcon);
+                    var nid = new NOTIFYICONIDENTIFIER
+                    {
+                        cbSize = Marshal.SizeOf(typeof(NOTIFYICONIDENTIFIER)),
+                        hWnd = window.Handle,
+                        uID = id
+                    };
+                    RECT rect;
+                    if (Shell_NotifyIconGetRect(ref nid, out rect) == 0)
+                    {
+                        return new System.Drawing.Rectangle(rect.left, rect.top, rect.right - rect.left, rect.bottom - rect.top);
+                    }
+                }
+            }
+            catch { }
+            return System.Drawing.Rectangle.Empty;
+        }
+
+        private IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
+        {
+            if (nCode >= 0 && (int)wParam == WM_MOUSEWHEEL)
+            {
+                MSLLHOOKSTRUCT hookStruct = (MSLLHOOKSTRUCT)Marshal.PtrToStructure(lParam, typeof(MSLLHOOKSTRUCT));
+                bool isOverIcon = false;
+
+                var rect = GetIconRect();
+                if (!rect.IsEmpty && rect.Contains(hookStruct.pt.x, hookStruct.pt.y))
+                {
+                    isOverIcon = true;
+                }
+                else if ((DateTime.Now - _lastMouseMoveTime).TotalMilliseconds < 800)
+                {
+                    if (Math.Abs(hookStruct.pt.x - _lastMousePos.X) <= 24 && Math.Abs(hookStruct.pt.y - _lastMousePos.Y) <= 24)
+                    {
+                        isOverIcon = true;
+                    }
+                }
+
+                if (isOverIcon)
+                {
+                    short delta = (short)((hookStruct.mouseData >> 16) & 0xffff);
+                    int step = (delta > 0) ? 4 : -4;
+                    if (_onVolumeDelta != null)
+                    {
+                        _onVolumeDelta(step);
+                    }
+                    return (IntPtr)1;
+                }
+            }
+            return CallNextHookEx(_hookId, nCode, wParam, lParam);
+        }
+
+        public void Dispose()
+        {
+            if (_hookId != IntPtr.Zero)
+            {
+                UnhookWindowsHookEx(_hookId);
+                _hookId = IntPtr.Zero;
+            }
+        }
+    }
+    #endregion
+
     public class Settings
     {
         public string DeviceName = "Xiaomi 15 Pro";
@@ -1118,6 +1265,7 @@ namespace WiFiAudioConnector
         private HotkeyManager _hotkeyManager = null;
         private HotkeyConfigWindow _hotkeyWin = null;
         private ToolStripMenuItem _notifyMenuItem = null;
+        private TrayWheelVolumeController _trayWheelController = null;
         private Process _logcatProc = null;
         private int _phoneMaxVolume = 150;
         private DateTime _lastSliderSetTime = DateTime.MinValue;
@@ -1247,6 +1395,23 @@ namespace WiFiAudioConnector
                     ToggleFlyout();
                 }
             };
+            _trayWheelController = new TrayWheelVolumeController(_notifyIcon, OnTrayWheelVolumeDelta);
+        }
+
+        private void OnTrayWheelVolumeDelta(int delta)
+        {
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                int cur = _settings.MasterVolume;
+                int newVol = Math.Max(0, Math.Min(100, cur + delta));
+                SetVolumeFromUI(newVol, false);
+                if (_flyout != null)
+                {
+                    _flyout.UpdateVolumeUI(newVol, false);
+                }
+                string connTag = IsConnected ? "已连接" : "未连接";
+                _notifyIcon.Text = string.Format("WiFi 音频连接器 - 音量: {0}% ({1})", newVol, connTag);
+            }));
         }
 
         public void UpdateTrayIcon(bool connected)
@@ -2152,6 +2317,11 @@ namespace WiFiAudioConnector
         public void ExitApp()
         {
             Disconnect();
+            if (_trayWheelController != null)
+            {
+                _trayWheelController.Dispose();
+                _trayWheelController = null;
+            }
             if (_hotkeyManager != null)
             {
                 _hotkeyManager.Dispose();
