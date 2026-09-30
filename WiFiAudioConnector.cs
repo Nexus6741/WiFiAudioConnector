@@ -2585,9 +2585,12 @@ namespace WiFiAudioConnector
                 string modeTag = isTcp ? "Wi-Fi 无线" : "USB 有线";
                 int curBuffer = (_settings.LatencyMode == "game") ? (isTcp ? 30 : 10) : ((_settings.LatencyMode == "smooth") ? 80 : 50);
                 _notifyIcon.Text = string.Format("WiFi 音频连接器 - {0} [{1}] (已连接)", _settings.DeviceName, modeTag);
-                ShowNotification("设备已连接", string.Format("{0} [{1}]\n音频流已就绪 ({2}, {3}ms 缓冲)，直通电脑播放", _settings.DeviceName, modeTag, desc, curBuffer), ToolTipIcon.Info);
                 _flyout.UpdateState(ConnectionState.Connected);
                 StartPhoneVolumeSync(target, _scrcpyProc.Id);
+                if (_volumeOsd != null)
+                {
+                    _volumeOsd.ShowHint("音频流已就绪", string.Format("{0} [{1}]\n{2} | {3}ms 延迟缓冲", _settings.DeviceName, modeTag, desc, curBuffer));
+                }
 
                 // Watchdog task
                 Task.Run(() =>
@@ -2597,6 +2600,11 @@ namespace WiFiAudioConnector
                         _scrcpyProc.WaitForExit();
                     }
                     catch { }
+
+                    if (_isReloading)
+                    {
+                        return;
+                    }
 
                     string targetToMute = _currentActiveTarget;
                     _currentActiveTarget = null;
@@ -2621,6 +2629,45 @@ namespace WiFiAudioConnector
                 _notifyIcon.Text = "WiFi 音频连接器 (未连接)";
                 _flyout.UpdateState(ConnectionState.Disconnected);
                 ShowNotification("连接失败", "无法连接到设备，请确认手机已开机且处于连接状态", ToolTipIcon.Error);
+            }
+        }
+
+        private bool _isReloading = false;
+
+        public async void ReloadAudioStreamAsync(string noticeTag = null)
+        {
+            if (!IsConnected || _isBluetoothConnected || _isConnecting || _isReloading) return;
+
+            string target = _currentActiveTarget;
+            if (string.IsNullOrEmpty(target)) target = _settings.Target;
+
+            _isReloading = true;
+            try
+            {
+                if (_volumeOsd != null)
+                {
+                    _volumeOsd.ShowHint("参数热重载", noticeTag != null ? (noticeTag + "\n正在平滑热重载音频流...") : "正在平滑热重载音频流...");
+                }
+
+                _notifyIcon.Text = "WiFi 音频连接器 (正在平滑切换参数...)";
+
+                StopPhoneVolumeSync();
+
+                if (_scrcpyProc != null && !_scrcpyProc.HasExited)
+                {
+                    try { _scrcpyProc.Kill(); } catch { }
+                }
+                _scrcpyProc = null;
+
+                await Task.Delay(350);
+
+                _isReloading = false;
+                ConnectAsync(target);
+            }
+            catch (Exception ex)
+            {
+                LogLine("ReloadAudioStreamAsync Exception: " + ex);
+                _isReloading = false;
             }
         }
 
@@ -3684,7 +3731,16 @@ namespace WiFiAudioConnector
                 Margin = new Thickness(0, 2, 0, 4),
                 IsChecked = (_app.CurrentSettings.Codec == "raw")
             };
-            _rbRaw.Checked += (s, e) => { _app.CurrentSettings.Codec = "raw"; _app.CurrentSettings.Save(); };
+            _rbRaw.Checked += (s, e) =>
+            {
+                if (_app.CurrentSettings.Codec == "raw") return;
+                _app.CurrentSettings.Codec = "raw";
+                _app.CurrentSettings.Save();
+                if (_app.IsConnected && !_app.IsBluetoothConnected)
+                {
+                    _app.ReloadAudioStreamAsync("已切换音质: Raw PCM 原生无损");
+                }
+            };
             qualityPanel.Children.Add(_rbRaw);
 
             _rbOpus320 = new RadioButton
@@ -3696,7 +3752,16 @@ namespace WiFiAudioConnector
                 Margin = new Thickness(0, 2, 0, 4),
                 IsChecked = (_app.CurrentSettings.Codec == "opus320")
             };
-            _rbOpus320.Checked += (s, e) => { _app.CurrentSettings.Codec = "opus320"; _app.CurrentSettings.Save(); };
+            _rbOpus320.Checked += (s, e) =>
+            {
+                if (_app.CurrentSettings.Codec == "opus320") return;
+                _app.CurrentSettings.Codec = "opus320";
+                _app.CurrentSettings.Save();
+                if (_app.IsConnected && !_app.IsBluetoothConnected)
+                {
+                    _app.ReloadAudioStreamAsync("已切换音质: Opus 320K 广播级");
+                }
+            };
             qualityPanel.Children.Add(_rbOpus320);
 
             _rbOpus128 = new RadioButton
@@ -3708,7 +3773,16 @@ namespace WiFiAudioConnector
                 Margin = new Thickness(0, 2, 0, 2),
                 IsChecked = (_app.CurrentSettings.Codec == "opus128")
             };
-            _rbOpus128.Checked += (s, e) => { _app.CurrentSettings.Codec = "opus128"; _app.CurrentSettings.Save(); };
+            _rbOpus128.Checked += (s, e) =>
+            {
+                if (_app.CurrentSettings.Codec == "opus128") return;
+                _app.CurrentSettings.Codec = "opus128";
+                _app.CurrentSettings.Save();
+                if (_app.IsConnected && !_app.IsBluetoothConnected)
+                {
+                    _app.ReloadAudioStreamAsync("已切换音质: Opus 128K 极限省电");
+                }
+            };
             qualityPanel.Children.Add(_rbOpus128);
 
             qualityPanel.Children.Add(new Separator
@@ -3735,7 +3809,18 @@ namespace WiFiAudioConnector
                 Margin = new Thickness(0, 2, 0, 4),
                 IsChecked = (_app.CurrentSettings.LatencyMode == "game")
             };
-            _rbLatencyGame.Checked += (s, e) => { _app.CurrentSettings.LatencyMode = "game"; _app.CurrentSettings.Save(); };
+            _rbLatencyGame.Checked += (s, e) =>
+            {
+                if (_app.CurrentSettings.LatencyMode == "game") return;
+                _app.CurrentSettings.LatencyMode = "game";
+                _app.CurrentSettings.Save();
+                if (_app.IsConnected && !_app.IsBluetoothConnected)
+                {
+                    bool isUsb = !string.IsNullOrEmpty(_app.CurrentActiveTarget) && !_app.CurrentActiveTarget.Contains(":");
+                    string desc = isUsb ? "电竞极速档 (USB 10ms)" : "电竞极速档 (Wi-Fi 30ms)";
+                    _app.ReloadAudioStreamAsync("已切换延迟: " + desc);
+                }
+            };
             qualityPanel.Children.Add(_rbLatencyGame);
 
             _rbLatencyBalanced = new RadioButton
@@ -3747,7 +3832,16 @@ namespace WiFiAudioConnector
                 Margin = new Thickness(0, 2, 0, 4),
                 IsChecked = (_app.CurrentSettings.LatencyMode == "balanced" || string.IsNullOrEmpty(_app.CurrentSettings.LatencyMode))
             };
-            _rbLatencyBalanced.Checked += (s, e) => { _app.CurrentSettings.LatencyMode = "balanced"; _app.CurrentSettings.Save(); };
+            _rbLatencyBalanced.Checked += (s, e) =>
+            {
+                if (_app.CurrentSettings.LatencyMode == "balanced") return;
+                _app.CurrentSettings.LatencyMode = "balanced";
+                _app.CurrentSettings.Save();
+                if (_app.IsConnected && !_app.IsBluetoothConnected)
+                {
+                    _app.ReloadAudioStreamAsync("已切换延迟: 均衡推荐档 (50ms)");
+                }
+            };
             qualityPanel.Children.Add(_rbLatencyBalanced);
 
             _rbLatencySmooth = new RadioButton
@@ -3759,7 +3853,16 @@ namespace WiFiAudioConnector
                 Margin = new Thickness(0, 2, 0, 2),
                 IsChecked = (_app.CurrentSettings.LatencyMode == "smooth")
             };
-            _rbLatencySmooth.Checked += (s, e) => { _app.CurrentSettings.LatencyMode = "smooth"; _app.CurrentSettings.Save(); };
+            _rbLatencySmooth.Checked += (s, e) =>
+            {
+                if (_app.CurrentSettings.LatencyMode == "smooth") return;
+                _app.CurrentSettings.LatencyMode = "smooth";
+                _app.CurrentSettings.Save();
+                if (_app.IsConnected && !_app.IsBluetoothConnected)
+                {
+                    _app.ReloadAudioStreamAsync("已切换延迟: 穿墙防卡顿档 (80ms)");
+                }
+            };
             qualityPanel.Children.Add(_rbLatencySmooth);
 
             _qualityCard.Child = qualityPanel;
@@ -3783,8 +3886,26 @@ namespace WiFiAudioConnector
                 Margin = new Thickness(0, 0, 0, 6),
                 IsChecked = _app.CurrentSettings.MutePhone
             };
-            _cbMutePhone.Checked += (s, e) => { _app.CurrentSettings.MutePhone = true; _app.CurrentSettings.Save(); };
-            _cbMutePhone.Unchecked += (s, e) => { _app.CurrentSettings.MutePhone = false; _app.CurrentSettings.Save(); };
+            _cbMutePhone.Checked += (s, e) =>
+            {
+                if (_app.CurrentSettings.MutePhone) return;
+                _app.CurrentSettings.MutePhone = true;
+                _app.CurrentSettings.Save();
+                if (_app.IsConnected && !_app.IsBluetoothConnected)
+                {
+                    _app.ReloadAudioStreamAsync("已开启: 手机扬声器静音");
+                }
+            };
+            _cbMutePhone.Unchecked += (s, e) =>
+            {
+                if (!_app.CurrentSettings.MutePhone) return;
+                _app.CurrentSettings.MutePhone = false;
+                _app.CurrentSettings.Save();
+                if (_app.IsConnected && !_app.IsBluetoothConnected)
+                {
+                    _app.ReloadAudioStreamAsync("已开启: 手机与电脑同时发声");
+                }
+            };
             optsPanel.Children.Add(_cbMutePhone);
 
             _cbAutoConnect = new CheckBox
