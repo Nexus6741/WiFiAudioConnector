@@ -82,6 +82,18 @@ namespace WiFiAudioConnector
             }
         }
 
+        public string StatusTag
+        {
+            get
+            {
+                if (App.Instance != null && App.Instance.IsTargetConnected(Target))
+                {
+                    return "● 已连接";
+                }
+                return "";
+            }
+        }
+
         public string DisplayText
         {
             get
@@ -190,12 +202,45 @@ namespace WiFiAudioConnector
     internal enum EDataFlow { eRender, eCapture, eAll }
     internal enum ERole { eConsole, eMultimedia, eCommunications }
 
+    [StructLayout(LayoutKind.Sequential)]
+    internal struct PROPERTYKEY
+    {
+        public Guid fmtid;
+        public uint pid;
+    }
+
+    [StructLayout(LayoutKind.Explicit)]
+    internal struct PROPVARIANT
+    {
+        [FieldOffset(0)] public ushort vt;
+        [FieldOffset(2)] public ushort wReserved1;
+        [FieldOffset(4)] public ushort wReserved2;
+        [FieldOffset(6)] public ushort wReserved3;
+        [FieldOffset(8)] public IntPtr pwszVal;
+    }
+
     [Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
     internal interface IMMDeviceEnumerator
     {
-        int NotImpl1();
+        [PreserveSig]
+        int EnumAudioEndpoints(EDataFlow dataFlow, int dwStateMask, out IMMDeviceCollection ppDevices);
         [PreserveSig]
         int GetDefaultAudioEndpoint(EDataFlow dataFlow, ERole role, out IMMDevice ppDevice);
+        [PreserveSig]
+        int GetDevice([MarshalAs(UnmanagedType.LPWStr)] string pwstrId, out IMMDevice ppDevice);
+        [PreserveSig]
+        int RegisterEndpointNotificationCallback(IntPtr pClient);
+        [PreserveSig]
+        int UnregisterEndpointNotificationCallback(IntPtr pClient);
+    }
+
+    [Guid("0BD7A1BE-7A1A-44DB-8397-CC5392387B5E"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IMMDeviceCollection
+    {
+        [PreserveSig]
+        int GetCount(out uint pcDevices);
+        [PreserveSig]
+        int Item(uint nDevice, out IMMDevice ppDevice);
     }
 
     [Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
@@ -203,6 +248,27 @@ namespace WiFiAudioConnector
     {
         [PreserveSig]
         int Activate(ref Guid iid, int dwClsCtx, IntPtr pActivationParams, [MarshalAs(UnmanagedType.IUnknown)] out object ppInterface);
+        [PreserveSig]
+        int OpenPropertyStore(int stgmAccess, out IPropertyStore ppProperties);
+        [PreserveSig]
+        int GetId([MarshalAs(UnmanagedType.LPWStr)] out string ppstrId);
+        [PreserveSig]
+        int GetState(out int pdwState);
+    }
+
+    [Guid("886d8eeb-8cf2-4446-8d02-cdba1dbdcf99"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IPropertyStore
+    {
+        [PreserveSig]
+        int GetCount(out uint cProps);
+        [PreserveSig]
+        int GetAt(uint iProp, out PROPERTYKEY pkey);
+        [PreserveSig]
+        int GetValue(ref PROPERTYKEY key, out PROPVARIANT pv);
+        [PreserveSig]
+        int SetValue(ref PROPERTYKEY key, ref PROPVARIANT propvar);
+        [PreserveSig]
+        int Commit();
     }
 
     [Guid("77AA99A0-1BD6-484F-8BC7-2C654C9A9B6F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
@@ -362,6 +428,110 @@ namespace WiFiAudioConnector
             }
             catch { }
             return false;
+        }
+
+        private static readonly PROPERTYKEY PKEY_Device_FriendlyName = new PROPERTYKEY
+        {
+            fmtid = new Guid("a45c254e-df1c-4efd-8020-67d146a850e0"),
+            pid = 14
+        };
+
+        [DllImport("ole32.dll")]
+        private static extern int PropVariantClear(ref PROPVARIANT pvar);
+
+        public static string FindVirtualAudioRenderDevice(out string matchingMicName)
+        {
+            matchingMicName = null;
+            try
+            {
+                var enumerator = (IMMDeviceEnumerator)new MMDeviceEnumeratorComObject();
+                IMMDeviceCollection collRender;
+                var renderNames = new List<string>();
+                if (enumerator.EnumAudioEndpoints(EDataFlow.eRender, 1, out collRender) == 0 && collRender != null)
+                {
+                    uint count;
+                    collRender.GetCount(out count);
+                    for (uint i = 0; i < count; i++)
+                    {
+                        IMMDevice dev;
+                        if (collRender.Item(i, out dev) == 0 && dev != null)
+                        {
+                            IPropertyStore store;
+                            if (dev.OpenPropertyStore(0, out store) == 0 && store != null)
+                            {
+                                PROPERTYKEY key = PKEY_Device_FriendlyName;
+                                PROPVARIANT val;
+                                if (store.GetValue(ref key, out val) == 0)
+                                {
+                                    if (val.vt == 31 && val.pwszVal != IntPtr.Zero)
+                                    {
+                                        string name = Marshal.PtrToStringUni(val.pwszVal);
+                                        if (!string.IsNullOrEmpty(name)) renderNames.Add(name);
+                                    }
+                                    PropVariantClear(ref val);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                IMMDeviceCollection collCapture;
+                var captureNames = new List<string>();
+                if (enumerator.EnumAudioEndpoints(EDataFlow.eCapture, 1, out collCapture) == 0 && collCapture != null)
+                {
+                    uint count;
+                    collCapture.GetCount(out count);
+                    for (uint i = 0; i < count; i++)
+                    {
+                        IMMDevice dev;
+                        if (collCapture.Item(i, out dev) == 0 && dev != null)
+                        {
+                            IPropertyStore store;
+                            if (dev.OpenPropertyStore(0, out store) == 0 && store != null)
+                            {
+                                PROPERTYKEY key = PKEY_Device_FriendlyName;
+                                PROPVARIANT val;
+                                if (store.GetValue(ref key, out val) == 0)
+                                {
+                                    if (val.vt == 31 && val.pwszVal != IntPtr.Zero)
+                                    {
+                                        string name = Marshal.PtrToStringUni(val.pwszVal);
+                                        if (!string.IsNullOrEmpty(name)) captureNames.Add(name);
+                                    }
+                                    PropVariantClear(ref val);
+                                }
+                            }
+                        }
+                    }
+                }
+
+                string[] virtualKeywords = new string[] { "网易虚拟", "虚拟音频", "Virtual Audio", "CABLE Input", "VoiceMeeter Input", "VB-Audio", "Virtual Cable" };
+                foreach (var kw in virtualKeywords)
+                {
+                    foreach (var rName in renderNames)
+                    {
+                        if (rName.IndexOf(kw, StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            foreach (var cName in captureNames)
+                            {
+                                if (cName.IndexOf(kw, StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                    (kw == "CABLE Input" && cName.IndexOf("CABLE Output", StringComparison.OrdinalIgnoreCase) >= 0))
+                                {
+                                    matchingMicName = cName;
+                                    break;
+                                }
+                            }
+                            if (string.IsNullOrEmpty(matchingMicName) && captureNames.Count > 0)
+                            {
+                                matchingMicName = captureNames[0];
+                            }
+                            return rName;
+                        }
+                    }
+                }
+            }
+            catch { }
+            return null;
         }
 
         // Master endpoint volume control intentionally removed so this app NEVER affects Windows system master volume.
@@ -1181,6 +1351,7 @@ namespace WiFiAudioConnector
         public string Codec = "raw"; // "raw", "opus320", "opus128"
         public string LatencyMode = "balanced"; // "game", "balanced", "smooth"
         public bool MutePhone = true;
+        public bool MicDirectMode = false;
         public bool AutoConnect = true;
         public string NotificationMode = "osd"; // "osd", "windows", "none"
         public bool ShowNotifications
@@ -1216,6 +1387,7 @@ namespace WiFiAudioConnector
                 sb.AppendLine("Codec=" + Codec);
                 sb.AppendLine("LatencyMode=" + LatencyMode);
                 sb.AppendLine("MutePhone=" + (MutePhone ? "1" : "0"));
+                sb.AppendLine("MicDirectMode=" + (MicDirectMode ? "1" : "0"));
                 sb.AppendLine("AutoConnect=" + (AutoConnect ? "1" : "0"));
                 sb.AppendLine("NotificationMode=" + NotificationMode);
                 sb.AppendLine("ShowNotifications=" + (ShowNotifications ? "1" : "0"));
@@ -1268,6 +1440,7 @@ namespace WiFiAudioConnector
                             else if (k == "Codec") s.Codec = v;
                             else if (k == "LatencyMode") s.LatencyMode = v;
                             else if (k == "MutePhone") s.MutePhone = (v == "1");
+                            else if (k == "MicDirectMode") s.MicDirectMode = (v == "1");
                             else if (k == "AutoConnect") s.AutoConnect = (v == "1");
                             else if (k == "NotificationMode") s.NotificationMode = v.ToLowerInvariant();
                             else if (k == "ShowNotifications")
@@ -2145,6 +2318,7 @@ namespace WiFiAudioConnector
 
     public class App : Application
     {
+        public static App Instance { get; private set; }
         private static Mutex _mutex = null;
         private NotifyIcon _notifyIcon;
         private FlyoutWindow _flyout;
@@ -2152,8 +2326,45 @@ namespace WiFiAudioConnector
         private Process _scrcpyProc = null;
         private BluetoothAudioConnector _btConnector = new BluetoothAudioConnector();
         private bool _isBluetoothConnected = false;
-        public bool IsBluetoothConnected { get { return _isBluetoothConnected; } }
-        private bool _isConnecting = false;
+        private string _currentScrcpyTarget = null;
+        private string _currentScrcpyDeviceName = null;
+        private string _currentBtTarget = null;
+        private string _currentBtDeviceName = null;
+        private bool _isConnectingScrcpy = false;
+        private bool _isConnectingBt = false;
+
+        public bool IsScrcpyConnected { get { return _scrcpyProc != null && !_scrcpyProc.HasExited; } }
+        public bool IsBluetoothConnected { get { return _isBluetoothConnected && _btConnector != null && _btConnector.IsConnected; } }
+        public bool IsConnected { get { return IsScrcpyConnected || IsBluetoothConnected; } }
+
+        public string CurrentScrcpyTarget { get { return _currentScrcpyTarget; } }
+        public string CurrentScrcpyDeviceName { get { return _currentScrcpyDeviceName; } }
+        public string CurrentBtTarget { get { return _currentBtTarget; } }
+        public string CurrentBtDeviceName { get { return _currentBtDeviceName; } }
+        public string CurrentActiveTarget { get { return _currentScrcpyTarget ?? _currentBtTarget; } }
+
+        public bool IsTargetConnected(string target)
+        {
+            if (string.IsNullOrEmpty(target)) return false;
+            bool isBt = target.StartsWith(@"\\?\BTHENUM", StringComparison.OrdinalIgnoreCase) || target.StartsWith("Bluetooth#", StringComparison.OrdinalIgnoreCase);
+            if (isBt)
+            {
+                return IsBluetoothConnected && string.Equals(_currentBtTarget, target, StringComparison.OrdinalIgnoreCase);
+            }
+            else
+            {
+                if (!IsScrcpyConnected || string.IsNullOrEmpty(_currentScrcpyTarget)) return false;
+                if (string.Equals(_currentScrcpyTarget, target, StringComparison.OrdinalIgnoreCase)) return true;
+                if (_currentScrcpyTarget.StartsWith(target + ":", StringComparison.OrdinalIgnoreCase)) return true;
+                return false;
+            }
+        }
+
+        public App()
+        {
+            Instance = this;
+        }
+
         public List<DeviceItem> LastDiscoveredDevices = new List<DeviceItem>();
         private HotkeyManager _hotkeyManager = null;
         private HotkeyConfigWindow _hotkeyWin = null;
@@ -2249,7 +2460,7 @@ namespace WiFiAudioConnector
                     {
                         if (_isBluetoothConnected)
                         {
-                            Disconnect();
+                            DisconnectBluetooth(false);
                             ShowNotification("蓝牙音频已断开", "蓝牙音频连接已中断或设备超出配对范围", ToolTipIcon.Warning);
                         }
                     }));
@@ -2373,7 +2584,7 @@ namespace WiFiAudioConnector
                     _notifyIcon.Text = string.Format("WiFi 音频连接器 - 音量: {0}% (已连接)", newVol);
                     if (_volumeOsd != null)
                     {
-                        bool isUsb = !string.IsNullOrEmpty(_currentActiveTarget) && !_currentActiveTarget.Contains(":");
+                        bool isUsb = !string.IsNullOrEmpty(_currentScrcpyTarget) && !_currentScrcpyTarget.Contains(":");
                         string modeTag = isUsb ? "USB 有线" : "Wi-Fi 直通";
                         _volumeOsd.ShowVolume(newVol, false, modeTag);
                     }
@@ -2471,11 +2682,6 @@ namespace WiFiAudioConnector
                 var icon = Icon.FromHandle(iconHandle);
                 _notifyIcon.Icon = icon;
             }
-        }
-
-        public bool IsConnected
-        {
-            get { return (_isBluetoothConnected && _btConnector.IsConnected) || (_scrcpyProc != null && !_scrcpyProc.HasExited); }
         }
 
         public Settings CurrentSettings { get { return _settings; } }
@@ -2732,60 +2938,126 @@ namespace WiFiAudioConnector
             return detectedIp;
         }
 
-        public string CurrentActiveTarget { get { return _currentActiveTarget; } }
-        private string _currentActiveTarget = null;
-
-        public async void ConnectAsync(string specificTarget = null)
+        public static string TruncateNotifyText(string text)
         {
-            if (IsConnected || _isConnecting) return;
-            _isConnecting = true;
-            _flyout.UpdateState(ConnectionState.Connecting);
-            _notifyIcon.Text = "WiFi 音频连接器 (正在连接...)";
-            ShowNotification("正在连接", string.Format("正在连接 {0}...", _settings.DeviceName));
+            if (string.IsNullOrEmpty(text)) return "";
+            if (text.Length > 63) return text.Substring(0, 60) + "...";
+            return text;
+        }
+
+        public void UpdateOverallState()
+        {
+            bool scrcpyOn = IsScrcpyConnected;
+            bool btOn = IsBluetoothConnected;
+            UpdateTrayIcon(scrcpyOn || btOn);
+
+            if (scrcpyOn && btOn)
+            {
+                _notifyIcon.Text = TruncateNotifyText(string.Format("WiFi 音频连接器 (双设备并发: {0} + {1})", _currentScrcpyDeviceName ?? "scrcpy", _currentBtDeviceName ?? "蓝牙"));
+            }
+            else if (scrcpyOn)
+            {
+                string modeTag = (_currentScrcpyTarget != null && _currentScrcpyTarget.Contains(":")) ? "Wi-Fi" : "USB";
+                string roleTag = _settings.MicDirectMode ? "麦克风直连" : "已连接";
+                _notifyIcon.Text = TruncateNotifyText(string.Format("WiFi 音频连接器 - {0} [{1}] ({2})", _currentScrcpyDeviceName ?? _settings.DeviceName, modeTag, roleTag));
+            }
+            else if (btOn)
+            {
+                _notifyIcon.Text = TruncateNotifyText(string.Format("WiFi 音频连接器 - {0} [蓝牙] (已连接)", _currentBtDeviceName ?? _settings.DeviceName));
+            }
+            else
+            {
+                _notifyIcon.Text = "WiFi 音频连接器 (未连接)";
+            }
+
+            if (_flyout != null)
+            {
+                _flyout.UpdateUIState();
+            }
+        }
+
+        public async void ConnectAsync(string specificTarget = null, string specificName = null)
+        {
+            string target = !string.IsNullOrEmpty(specificTarget) ? specificTarget : _settings.Target;
+            string devName = !string.IsNullOrEmpty(specificName) ? specificName : _settings.DeviceName;
+            bool isBt = target != null && (target.StartsWith(@"\\?\BTHENUM", StringComparison.OrdinalIgnoreCase) || target.StartsWith("Bluetooth#", StringComparison.OrdinalIgnoreCase));
+
+            if (isBt)
+            {
+                if (_isConnectingBt) return;
+                if (IsBluetoothConnected && string.Equals(_currentBtTarget, target, StringComparison.OrdinalIgnoreCase)) return;
+
+                _isConnectingBt = true;
+                _flyout.UpdateState(ConnectionState.Connecting);
+                _notifyIcon.Text = TruncateNotifyText(string.Format("WiFi 音频连接器 (正在连接蓝牙: {0}...)", devName));
+                ShowNotification("正在连接蓝牙", string.Format("正在连接 {0}...", devName));
+
+                // If connecting Bluetooth to the SAME device currently on scrcpy, smoothly disconnect scrcpy
+                if (IsScrcpyConnected && !string.IsNullOrEmpty(_currentScrcpyDeviceName) &&
+                    string.Equals(_currentScrcpyDeviceName.Trim(), devName.Trim(), StringComparison.OrdinalIgnoreCase))
+                {
+                    DisconnectScrcpy(false);
+                }
+
+                // If another Bluetooth device was connected, disconnect it
+                if (IsBluetoothConnected)
+                {
+                    DisconnectBluetooth(false);
+                }
+
+                bool btOk = await _btConnector.ConnectAsync(target);
+                _isConnectingBt = false;
+
+                if (btOk)
+                {
+                    _isBluetoothConnected = true;
+                    _currentBtTarget = target;
+                    _currentBtDeviceName = devName;
+                    UpdateOverallState();
+                    ShowNotification("蓝牙音频已连接", string.Format("{0} [蓝牙]\n已开启 Windows 蓝牙 A2DP 音频直通", devName), ToolTipIcon.Info);
+                    _flyout.SyncCurrentDeviceToUI();
+                }
+                else
+                {
+                    _isBluetoothConnected = false;
+                    _currentBtTarget = null;
+                    _currentBtDeviceName = null;
+                    UpdateOverallState();
+                    ShowNotification("蓝牙连接失败", "无法连接到该蓝牙音频设备，请确认手机已开机、开启蓝牙并处于配对范围", ToolTipIcon.Error);
+                }
+                return;
+            }
+
+            // Scrcpy (Wi-Fi or USB)
+            if (_isConnectingScrcpy) return;
+            if (IsScrcpyConnected && string.Equals(_currentScrcpyTarget, target, StringComparison.OrdinalIgnoreCase)) return;
 
             string adbPath = FindToolPath("adb.exe");
             string scrcpyPath = FindToolPath("scrcpy.exe");
 
             if (string.IsNullOrEmpty(adbPath) || string.IsNullOrEmpty(scrcpyPath))
             {
-                _isConnecting = false;
                 _flyout.UpdateState(ConnectionState.Disconnected);
                 MessageBox.Show("未能找到 scrcpy 或 adb 组件！请确保程序目录下存在 scrcpy.exe 与 adb.exe。", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
                 return;
             }
 
-            string target = !string.IsNullOrEmpty(specificTarget) ? specificTarget : _settings.Target;
-            bool isBt = target != null && (target.StartsWith(@"\\?\BTHENUM", StringComparison.OrdinalIgnoreCase) || target.StartsWith("Bluetooth#", StringComparison.OrdinalIgnoreCase));
+            _isConnectingScrcpy = true;
+            _flyout.UpdateState(ConnectionState.Connecting);
+            _notifyIcon.Text = TruncateNotifyText(string.Format("WiFi 音频连接器 (正在连接 {0}...)", devName));
+            ShowNotification("正在连接", string.Format("正在连接 {0}...", devName));
 
-            if (isBt)
+            // If connecting scrcpy to the SAME device currently on Bluetooth, smoothly disconnect Bluetooth
+            if (IsBluetoothConnected && !string.IsNullOrEmpty(_currentBtDeviceName) &&
+                string.Equals(_currentBtDeviceName.Trim(), devName.Trim(), StringComparison.OrdinalIgnoreCase))
             {
-                _isConnecting = true;
-                _flyout.UpdateState(ConnectionState.Connecting);
-                _notifyIcon.Text = string.Format("WiFi 音频连接器 (正在连接蓝牙: {0}...)", _settings.DeviceName);
+                DisconnectBluetooth(false);
+            }
 
-                bool btOk = await _btConnector.ConnectAsync(target);
-                _isConnecting = false;
-
-                if (btOk)
-                {
-                    _isBluetoothConnected = true;
-                    _currentActiveTarget = target;
-                    UpdateTrayIcon(true);
-                    _flyout.UpdateState(ConnectionState.Connected);
-                    _notifyIcon.Text = string.Format("WiFi 音频连接器 (已连接 [蓝牙]: {0})", _settings.DeviceName);
-                    ShowNotification("蓝牙音频已连接", string.Format("{0} [蓝牙]\n已开启 Windows 蓝牙 A2DP 音频直通", _settings.DeviceName), ToolTipIcon.Info);
-                    _flyout.SyncCurrentDeviceToUI();
-                }
-                else
-                {
-                    _isBluetoothConnected = false;
-                    _currentActiveTarget = null;
-                    UpdateTrayIcon(false);
-                    _flyout.UpdateState(ConnectionState.Disconnected);
-                    _notifyIcon.Text = "WiFi 音频连接器 (未连接)";
-                    ShowNotification("蓝牙连接失败", "无法连接到该蓝牙音频设备，请确认手机已开机、开启蓝牙并处于配对范围", ToolTipIcon.Error);
-                }
-                return;
+            // If another scrcpy device was connected, disconnect it
+            if (IsScrcpyConnected)
+            {
+                DisconnectScrcpy(false);
             }
 
             if (string.IsNullOrEmpty(target) || (target.Contains(".") && !target.Contains(":")))
@@ -2795,6 +3067,13 @@ namespace WiFiAudioConnector
             }
 
             bool isTcp = target.Contains(":");
+
+            string vRender = null;
+            string matchingMic = null;
+            if (_settings.MicDirectMode)
+            {
+                vRender = WindowsAudioSessionController.FindVirtualAudioRenderDevice(out matchingMic);
+            }
 
             bool ok = await Task.Run<bool>(() =>
             {
@@ -2823,20 +3102,20 @@ namespace WiFiAudioConnector
                     else if (_settings.Codec == "opus128") codecArg = "--audio-codec=opus --audio-bit-rate=128K";
 
                     int bufferMs = 50;
-                    if (_settings.LatencyMode == "game")
+                    if (_settings.LatencyMode == "game") bufferMs = 30;
+                    else if (_settings.LatencyMode == "smooth") bufferMs = 80;
+
+                    string modeArg;
+                    if (_settings.MicDirectMode)
                     {
+                        modeArg = "--audio-source=mic-voice-communication";
                         bufferMs = 30;
-                    }
-                    else if (_settings.LatencyMode == "smooth")
-                    {
-                        bufferMs = 80;
                     }
                     else
                     {
-                        bufferMs = 50;
+                        modeArg = _settings.MutePhone ? "--audio-source=output" : "--audio-source=playback --audio-dup";
                     }
 
-                    string modeArg = _settings.MutePhone ? "--audio-source=output" : "--audio-source=playback --audio-dup";
                     string scrcpyArgs = string.Format("-s {0} --no-video --no-window {1} {2} --audio-buffer={3}", target, codecArg, modeArg, bufferMs);
 
                     var psiScrcpy = new ProcessStartInfo
@@ -2848,8 +3127,21 @@ namespace WiFiAudioConnector
                         WindowStyle = ProcessWindowStyle.Hidden
                     };
 
+                    if (_settings.MicDirectMode && !string.IsNullOrEmpty(vRender))
+                    {
+                        psiScrcpy.EnvironmentVariables["SDL_AUDIO_DEVICE_NAME"] = vRender;
+                    }
+
                     _scrcpyProc = Process.Start(psiScrcpy);
                     Thread.Sleep(1500);
+
+                    if (_settings.MicDirectMode && (_scrcpyProc == null || _scrcpyProc.HasExited))
+                    {
+                        string fallbackArgs = string.Format("-s {0} --no-video --no-window {1} --audio-source=mic --audio-buffer={2}", target, codecArg, bufferMs);
+                        psiScrcpy.Arguments = fallbackArgs;
+                        _scrcpyProc = Process.Start(psiScrcpy);
+                        Thread.Sleep(1500);
+                    }
 
                     return _scrcpyProc != null && !_scrcpyProc.HasExited;
                 }
@@ -2860,20 +3152,29 @@ namespace WiFiAudioConnector
                 }
             });
 
-            _isConnecting = false;
+            _isConnectingScrcpy = false;
 
             if (ok)
             {
-                _currentActiveTarget = target;
-                UpdateTrayIcon(true);
-                string desc = _settings.Codec == "raw" ? "Raw PCM 无损" : "Opus 320K";
+                _currentScrcpyTarget = target;
+                _currentScrcpyDeviceName = devName;
+                UpdateOverallState();
+
                 string modeTag = isTcp ? "Wi-Fi 无线" : "USB 有线";
-                int curBuffer = (_settings.LatencyMode == "game") ? 30 : ((_settings.LatencyMode == "smooth") ? 80 : 50);
-                _notifyIcon.Text = string.Format("WiFi 音频连接器 - {0} [{1}] (已连接)", _settings.DeviceName, modeTag);
-                _flyout.UpdateState(ConnectionState.Connected);
+                if (_settings.MicDirectMode)
+                {
+                    string recTip = !string.IsNullOrEmpty(matchingMic) ? string.Format("\n录音输入声卡: {0}", matchingMic) : "\n电脑耳机监听输出 (可配合虚拟声卡开黑)";
+                    ShowNotification("无线麦克风已就绪", string.Format("{0} [{1}]\n已开启手机麦克风直连电脑{2}", devName, modeTag, recTip), ToolTipIcon.Info);
+                }
+                else
+                {
+                    string desc = _settings.Codec == "raw" ? "Raw PCM 无损" : "Opus 320K";
+                    int curBuffer = (_settings.LatencyMode == "game") ? 30 : ((_settings.LatencyMode == "smooth") ? 80 : 50);
+                    ShowNotification("音频流已就绪", string.Format("{0} [{1}]\n{2} | {3}ms 延迟缓冲", devName, modeTag, desc, curBuffer));
+                }
+
                 StartPhoneVolumeSync(target, _scrcpyProc.Id);
                 StartBatteryMonitor(target);
-                ShowNotification("音频流已就绪", string.Format("{0} [{1}]\n{2} | {3}ms 延迟缓冲", _settings.DeviceName, modeTag, desc, curBuffer));
 
                 // Watchdog task
                 Task.Run(() =>
@@ -2889,31 +3190,18 @@ namespace WiFiAudioConnector
                         return;
                     }
 
-                    string targetToMute = _currentActiveTarget;
-                    _currentActiveTarget = null;
-                    StopPhoneVolumeSync();
-                    StopBatteryMonitor();
-                    _lastBatteryInfo = null;
                     Dispatcher.BeginInvoke(new Action(() =>
                     {
-                        UpdateTrayIcon(false);
-                        _notifyIcon.Text = "WiFi 音频连接器 (未连接)";
-                        _flyout.UpdateState(ConnectionState.Disconnected);
-                        _flyout.UpdateBatteryUI(null);
+                        DisconnectScrcpy(false);
                     }));
-
-                    if (_settings.SyncPhoneVolume && _settings.MuteOnDisconnect && !string.IsNullOrEmpty(targetToMute))
-                    {
-                        MutePhoneMedia(targetToMute);
-                    }
                 });
             }
             else
             {
-                _currentActiveTarget = null;
-                UpdateTrayIcon(false);
-                _notifyIcon.Text = "WiFi 音频连接器 (未连接)";
-                _flyout.UpdateState(ConnectionState.Disconnected);
+                _scrcpyProc = null;
+                _currentScrcpyTarget = null;
+                _currentScrcpyDeviceName = null;
+                UpdateOverallState();
                 ShowNotification("连接失败", "无法连接到设备，请确认手机已开机且处于连接状态", ToolTipIcon.Error);
             }
         }
@@ -2922,23 +3210,22 @@ namespace WiFiAudioConnector
 
         public async void ReloadAudioStreamAsync(string noticeTag = null)
         {
-            if (!IsConnected || _isBluetoothConnected || _isConnecting || _isReloading) return;
+            if (!IsScrcpyConnected || _isConnectingScrcpy || _isReloading) return;
 
-            string target = _currentActiveTarget;
+            string target = _currentScrcpyTarget;
             if (string.IsNullOrEmpty(target)) target = _settings.Target;
+            string devName = _currentScrcpyDeviceName ?? _settings.DeviceName;
 
             _isReloading = true;
             try
             {
                 ShowNotification("参数热重载", noticeTag != null ? (noticeTag + "\n正在平滑热重载音频流...") : "正在平滑热重载音频流...");
 
-                _notifyIcon.Text = "WiFi 音频连接器 (正在平滑切换参数...)";
-
                 StopPhoneVolumeSync();
                 StopBatteryMonitor();
 
                 // 1. 断连前先静音手机媒体音量，彻底消除重连间隙可能发生的设备扬声器声音外露
-                if (!string.IsNullOrEmpty(target))
+                if (!string.IsNullOrEmpty(target) && !_settings.MicDirectMode)
                 {
                     await Task.Run(() => MutePhoneMediaQuick(target));
                 }
@@ -2960,7 +3247,7 @@ namespace WiFiAudioConnector
 
                 // 4. 重建连接并在连接就绪后自动恢复设备音量
                 _isReloading = false;
-                ConnectAsync(target);
+                ConnectAsync(target, devName);
             }
             catch (Exception ex)
             {
@@ -2969,31 +3256,54 @@ namespace WiFiAudioConnector
             }
         }
 
-        public void Disconnect()
+        public void Disconnect(string specificTarget = null)
         {
-            if (_isBluetoothConnected)
+            if (!string.IsNullOrEmpty(specificTarget))
             {
-                string devName = _settings.DeviceName;
-                _isBluetoothConnected = false;
-                _currentActiveTarget = null;
-                _btConnector.Disconnect();
-                UpdateTrayIcon(false);
-                _notifyIcon.Text = "WiFi 音频连接器 (未连接)";
-                _flyout.UpdateState(ConnectionState.Disconnected);
-                _flyout.UpdateBatteryUI(null);
-                ShowNotification("已断开连接", string.Format("{0} [蓝牙]\n音频直通已关闭", devName), ToolTipIcon.Info);
-                if (_flyout != null) _flyout.SyncCurrentDeviceToUI();
+                bool isBt = specificTarget.StartsWith(@"\\?\BTHENUM", StringComparison.OrdinalIgnoreCase) || specificTarget.StartsWith("Bluetooth#", StringComparison.OrdinalIgnoreCase);
+                if (isBt) DisconnectBluetooth(true);
+                else DisconnectScrcpy(true);
                 return;
             }
 
-            string targetToMute = _currentActiveTarget;
-            _currentActiveTarget = null;
+            var sel = (_flyout != null) ? _flyout.GetSelectedDevice() : null;
+            if (sel != null && !string.IsNullOrEmpty(sel.Target))
+            {
+                if (sel.IsBluetooth) DisconnectBluetooth(true);
+                else DisconnectScrcpy(true);
+            }
+            else
+            {
+                DisconnectBluetooth(true);
+                DisconnectScrcpy(true);
+            }
+        }
+
+        public void DisconnectBluetooth(bool showNotice = true)
+        {
+            if (!_isBluetoothConnected && _btConnector == null) return;
+            string devName = _currentBtDeviceName ?? _settings.DeviceName;
+            _isBluetoothConnected = false;
+            _currentBtTarget = null;
+            _currentBtDeviceName = null;
+            try { _btConnector.Disconnect(); } catch { }
+            UpdateOverallState();
+            if (_flyout != null) _flyout.SyncCurrentDeviceToUI();
+            if (showNotice) ShowNotification("已断开蓝牙连接", string.Format("{0} [蓝牙]\n音频直通已关闭", devName), ToolTipIcon.Info);
+        }
+
+        public void DisconnectScrcpy(bool showNotice = true)
+        {
+            string targetToMute = _currentScrcpyTarget;
+            string devName = _currentScrcpyDeviceName ?? _settings.DeviceName;
+            _currentScrcpyTarget = null;
+            _currentScrcpyDeviceName = null;
             StopPhoneVolumeSync();
             StopBatteryMonitor();
             _lastBatteryInfo = null;
             if (_flyout != null) _flyout.UpdateBatteryUI(null);
 
-            if (_settings.SyncPhoneVolume && _settings.MuteOnDisconnect && !string.IsNullOrEmpty(targetToMute))
+            if (_settings.SyncPhoneVolume && _settings.MuteOnDisconnect && !string.IsNullOrEmpty(targetToMute) && !_settings.MicDirectMode)
             {
                 MutePhoneMedia(targetToMute);
             }
@@ -3007,10 +3317,9 @@ namespace WiFiAudioConnector
             }
             catch { }
             _scrcpyProc = null;
-            UpdateTrayIcon(false);
-            _notifyIcon.Text = "WiFi 音频连接器 (未连接)";
-            _flyout.UpdateState(ConnectionState.Disconnected);
-            ShowNotification("已断开连接", "音频传输已停止");
+            UpdateOverallState();
+            if (_flyout != null) _flyout.SyncCurrentDeviceToUI();
+            if (showNotice) ShowNotification("已断开连接", string.Format("{0}\n音频传输已停止", devName), ToolTipIcon.Info);
         }
 
         public void ToggleFlyout()
@@ -3097,25 +3406,32 @@ namespace WiFiAudioConnector
 
         private void OnDeviceHotkeyPressed(string target)
         {
-            if (_isConnecting) return;
+            if (string.IsNullOrEmpty(target)) return;
 
             DeviceHotkeyBinding binding = null;
             _settings.DeviceHotkeys.TryGetValue(target, out binding);
             string devName = (binding != null) ? binding.DisplayName : target;
+            bool isBt = target.StartsWith(@"\\?\BTHENUM", StringComparison.OrdinalIgnoreCase) || target.StartsWith("Bluetooth#", StringComparison.OrdinalIgnoreCase);
 
             // If currently connected to THIS exact target -> Toggle Disconnect!
-            if (IsConnected && string.Equals(_currentActiveTarget, target, StringComparison.OrdinalIgnoreCase))
+            if (IsTargetConnected(target))
             {
-                Disconnect();
+                Disconnect(target);
                 ShowNotification("快捷键已触发", string.Format("已断开: {0}", devName), ToolTipIcon.Info);
             }
             else
             {
-                // If currently connected to another target/mode -> Disconnect first then switch!
-                if (IsConnected)
+                // If connecting Bluetooth and another Bluetooth is connected -> disconnect that Bluetooth
+                if (isBt && IsBluetoothConnected)
                 {
-                    Disconnect();
-                    Thread.Sleep(300);
+                    DisconnectBluetooth(false);
+                    Thread.Sleep(200);
+                }
+                // If connecting Scrcpy and another Scrcpy is connected -> disconnect that Scrcpy
+                else if (!isBt && IsScrcpyConnected)
+                {
+                    DisconnectScrcpy(false);
+                    Thread.Sleep(200);
                 }
 
                 _settings.Target = target;
@@ -3137,7 +3453,7 @@ namespace WiFiAudioConnector
                 }
 
                 ShowNotification("快捷键已触发", string.Format("正在快速直连: {0}...", devName), ToolTipIcon.Info);
-                ConnectAsync(target);
+                ConnectAsync(target, binding != null ? binding.DeviceName : null);
             }
         }
 
@@ -3440,8 +3756,8 @@ namespace WiFiAudioConnector
 
                     try
                     {
-                        string target = _currentActiveTarget;
-                        if (string.IsNullOrEmpty(target) || !IsConnected) break;
+                        string target = _currentScrcpyTarget;
+                        if (string.IsNullOrEmpty(target) || !IsScrcpyConnected) break;
                         string adbPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "adb.exe");
                         string cmdArgs;
                         if (muteToSync)
@@ -3480,13 +3796,13 @@ namespace WiFiAudioConnector
             _lastSliderSetTime = DateTime.Now;
 
             float ratio = volumePercent / 100.0f;
-            if (!_isBluetoothConnected && _scrcpyProc != null && !_scrcpyProc.HasExited)
+            if (_scrcpyProc != null && !_scrcpyProc.HasExited)
             {
                 WindowsAudioSessionController.SetProcessVolume(_scrcpyProc.Id, ratio, isMuted);
             }
 
             // Sync to phone through serial throttled queue (only for ADB streaming)
-            if (!_isBluetoothConnected && _settings.SyncPhoneVolume && IsConnected && !string.IsNullOrEmpty(_currentActiveTarget))
+            if (_settings.SyncPhoneVolume && IsScrcpyConnected && !string.IsNullOrEmpty(_currentScrcpyTarget))
             {
                 QueuePhoneVolumeSync(ratio, isMuted);
             }
@@ -3596,14 +3912,14 @@ namespace WiFiAudioConnector
         public void StartBatteryMonitor(string target)
         {
             StopBatteryMonitor();
-            if (string.IsNullOrEmpty(target) || _isBluetoothConnected) return;
+            if (string.IsNullOrEmpty(target) || !IsScrcpyConnected) return;
 
             _batteryCts = new CancellationTokenSource();
             var token = _batteryCts.Token;
 
             Task.Run(async () =>
             {
-                while (!token.IsCancellationRequested && IsConnected && !_isBluetoothConnected)
+                while (!token.IsCancellationRequested && IsScrcpyConnected)
                 {
                     try
                     {
@@ -3661,42 +3977,51 @@ namespace WiFiAudioConnector
             if (!IsConnected || _notifyIcon == null) return;
             try
             {
-                if (_isBluetoothConnected)
+                bool scrcpyOn = IsScrcpyConnected;
+                bool btOn = IsBluetoothConnected;
+
+                if (scrcpyOn && btOn)
                 {
-                    string btText = string.Format("WiFi 音频连接器 (已连接 [蓝牙]: {0})", _settings.DeviceName);
-                    if (btText.Length >= 63) btText = btText.Substring(0, 60) + "...";
-                    _notifyIcon.Text = btText;
+                    string text = string.Format("WiFi 音频连接器 (双设备并发: {0} + {1})", _currentScrcpyDeviceName ?? "Wi-Fi", _currentBtDeviceName ?? "蓝牙");
+                    _notifyIcon.Text = TruncateNotifyText(text);
                     return;
                 }
 
-                string modeTag = (!string.IsNullOrEmpty(_currentActiveTarget) && _currentActiveTarget.Contains(":")) ? "Wi-Fi" : "USB";
-                string batStr = "";
-                if (_lastBatteryInfo != null && _lastBatteryInfo.Level >= 0)
+                if (btOn)
                 {
-                    batStr = string.Format(" {0}{1}%", _lastBatteryInfo.IsCharging ? "⚡" : "🔋", _lastBatteryInfo.Level);
+                    string btText = string.Format("WiFi 音频连接器 (已连接 [蓝牙]: {0})", _currentBtDeviceName ?? _settings.DeviceName);
+                    _notifyIcon.Text = TruncateNotifyText(btText);
+                    return;
                 }
-                string text = string.Format("WiFi 音频连接器 - {0} [{1}]{2} (已连接)", _settings.DeviceName, modeTag, batStr);
-                if (text.Length >= 63)
+
+                if (scrcpyOn)
                 {
-                    text = text.Substring(0, 60) + "...";
+                    string modeTag = (!string.IsNullOrEmpty(_currentScrcpyTarget) && _currentScrcpyTarget.Contains(":")) ? "Wi-Fi" : "USB";
+                    string batStr = "";
+                    if (_lastBatteryInfo != null && _lastBatteryInfo.Level >= 0)
+                    {
+                        batStr = string.Format(" {0}{1}%", _lastBatteryInfo.IsCharging ? "⚡" : "🔋", _lastBatteryInfo.Level);
+                    }
+                    string roleTag = _settings.MicDirectMode ? "麦克风直连" : "已连接";
+                    string text = string.Format("WiFi 音频连接器 - {0} [{1}]{2} ({3})", _currentScrcpyDeviceName ?? _settings.DeviceName, modeTag, batStr, roleTag);
+                    _notifyIcon.Text = TruncateNotifyText(text);
                 }
-                _notifyIcon.Text = text;
             }
             catch { }
         }
 
         public void SendMediaKey(int keyCode, string actionName)
         {
-            if (!IsConnected || _isBluetoothConnected)
+            if (!IsScrcpyConnected)
             {
                 if (_volumeOsd != null)
                 {
-                    _volumeOsd.ShowHint("媒体控制", _isBluetoothConnected ? "蓝牙直通模式请直接在手机端操作" : "未连接设备");
+                    _volumeOsd.ShowHint("媒体控制", IsBluetoothConnected ? "蓝牙直通模式请直接在手机端操作" : "未连接设备");
                 }
                 return;
             }
 
-            string target = _currentActiveTarget;
+            string target = _currentScrcpyTarget;
             if (string.IsNullOrEmpty(target)) target = _settings.Target;
             if (string.IsNullOrEmpty(target)) return;
 
@@ -3785,6 +4110,8 @@ namespace WiFiAudioConnector
         private RadioButton _rbLatencyBalanced;
         private RadioButton _rbLatencySmooth;
         private CheckBox _cbMutePhone;
+        private CheckBox _cbMicDirect;
+        private TextBlock _tbMicTip;
         private CheckBox _cbAutoConnect;
         private Button _btnNotifyOsd;
         private Button _btnNotifyWin;
@@ -3974,6 +4301,7 @@ namespace WiFiAudioConnector
             string cbTemplateXaml = @"
                 <DataTemplate xmlns=""http://schemas.microsoft.com/winfx/2006/xaml/presentation"">
                     <DockPanel LastChildFill=""True"" Margin=""1"">
+                        <TextBlock DockPanel.Dock=""Right"" Text=""{Binding StatusTag}"" Foreground=""#4ade80"" FontSize=""10"" FontWeight=""Bold"" Margin=""4,0,2,0"" VerticalAlignment=""Center""/>
                         <TextBlock Text=""{Binding ModeIcon}"" FontFamily=""{Binding ModeIconFont}"" Foreground=""{Binding ModeIconBrush}"" FontSize=""12"" VerticalAlignment=""Center"" Margin=""0,0,6,0"" Width=""16"" TextAlignment=""Center""/>
                         <TextBlock Text=""{Binding DisplayText}"" FontFamily=""Microsoft YaHei UI, Segoe UI"" FontSize=""11"" VerticalAlignment=""Center""/>
                     </DockPanel>
@@ -4109,8 +4437,18 @@ namespace WiFiAudioConnector
             };
             _btnConnect.Click += (s, e) =>
             {
-                if (_app.IsConnected) _app.Disconnect();
-                else _app.ConnectAsync();
+                var sel = _cbDevices != null ? _cbDevices.SelectedItem as DeviceItem : null;
+                string target = (sel != null && !string.IsNullOrEmpty(sel.Target)) ? sel.Target : _app.CurrentSettings.Target;
+                string devName = (sel != null && !string.IsNullOrEmpty(sel.Name)) ? sel.Name : _app.CurrentSettings.DeviceName;
+
+                if (_app.IsTargetConnected(target))
+                {
+                    _app.Disconnect(target);
+                }
+                else
+                {
+                    _app.ConnectAsync(target, devName);
+                }
             };
             devicePanel.Children.Add(_btnConnect);
 
@@ -4323,7 +4661,7 @@ namespace WiFiAudioConnector
                 if (_app.CurrentSettings.Codec == "raw") return;
                 _app.CurrentSettings.Codec = "raw";
                 _app.CurrentSettings.Save();
-                if (_app.IsConnected && !_app.IsBluetoothConnected)
+                if (_app.IsScrcpyConnected)
                 {
                     _app.ReloadAudioStreamAsync("已切换音质: Raw PCM 原生无损");
                 }
@@ -4344,7 +4682,7 @@ namespace WiFiAudioConnector
                 if (_app.CurrentSettings.Codec == "opus320") return;
                 _app.CurrentSettings.Codec = "opus320";
                 _app.CurrentSettings.Save();
-                if (_app.IsConnected && !_app.IsBluetoothConnected)
+                if (_app.IsScrcpyConnected)
                 {
                     _app.ReloadAudioStreamAsync("已切换音质: Opus 320K 广播级");
                 }
@@ -4365,7 +4703,7 @@ namespace WiFiAudioConnector
                 if (_app.CurrentSettings.Codec == "opus128") return;
                 _app.CurrentSettings.Codec = "opus128";
                 _app.CurrentSettings.Save();
-                if (_app.IsConnected && !_app.IsBluetoothConnected)
+                if (_app.IsScrcpyConnected)
                 {
                     _app.ReloadAudioStreamAsync("已切换音质: Opus 128K 极限省电");
                 }
@@ -4401,7 +4739,7 @@ namespace WiFiAudioConnector
                 if (_app.CurrentSettings.LatencyMode == "game") return;
                 _app.CurrentSettings.LatencyMode = "game";
                 _app.CurrentSettings.Save();
-                if (_app.IsConnected && !_app.IsBluetoothConnected)
+                if (_app.IsScrcpyConnected)
                 {
                     _app.ReloadAudioStreamAsync("已切换延迟: 电竞极速档 (30ms)");
                 }
@@ -4422,7 +4760,7 @@ namespace WiFiAudioConnector
                 if (_app.CurrentSettings.LatencyMode == "balanced") return;
                 _app.CurrentSettings.LatencyMode = "balanced";
                 _app.CurrentSettings.Save();
-                if (_app.IsConnected && !_app.IsBluetoothConnected)
+                if (_app.IsScrcpyConnected)
                 {
                     _app.ReloadAudioStreamAsync("已切换延迟: 均衡推荐档 (50ms)");
                 }
@@ -4443,7 +4781,7 @@ namespace WiFiAudioConnector
                 if (_app.CurrentSettings.LatencyMode == "smooth") return;
                 _app.CurrentSettings.LatencyMode = "smooth";
                 _app.CurrentSettings.Save();
-                if (_app.IsConnected && !_app.IsBluetoothConnected)
+                if (_app.IsScrcpyConnected)
                 {
                     _app.ReloadAudioStreamAsync("已切换延迟: 穿墙防卡顿档 (80ms)");
                 }
@@ -4476,7 +4814,7 @@ namespace WiFiAudioConnector
                 if (_app.CurrentSettings.MutePhone) return;
                 _app.CurrentSettings.MutePhone = true;
                 _app.CurrentSettings.Save();
-                if (_app.IsConnected && !_app.IsBluetoothConnected)
+                if (_app.IsScrcpyConnected)
                 {
                     _app.ReloadAudioStreamAsync("已开启: 手机扬声器静音");
                 }
@@ -4486,12 +4824,58 @@ namespace WiFiAudioConnector
                 if (!_app.CurrentSettings.MutePhone) return;
                 _app.CurrentSettings.MutePhone = false;
                 _app.CurrentSettings.Save();
-                if (_app.IsConnected && !_app.IsBluetoothConnected)
+                if (_app.IsScrcpyConnected)
                 {
                     _app.ReloadAudioStreamAsync("已开启: 手机与电脑同时发声");
                 }
             };
             optsPanel.Children.Add(_cbMutePhone);
+
+            _cbMicDirect = new CheckBox
+            {
+                Content = "🎙️ 手机麦克风直连电脑 (变身无线话筒/开黑连麦)",
+                Foreground = System.Windows.Media.Brushes.White,
+                FontSize = 11,
+                Margin = new Thickness(0, 0, 0, 4),
+                IsChecked = _app.CurrentSettings.MicDirectMode
+            };
+            _tbMicTip = new TextBlock
+            {
+                FontSize = 10,
+                Foreground = new SolidColorBrush(Color.FromArgb(220, 125, 211, 252)),
+                Background = new SolidColorBrush(Color.FromArgb(80, 14, 165, 233)),
+                Padding = new Thickness(8, 4, 8, 4),
+                Margin = new Thickness(0, 0, 0, 6),
+                TextWrapping = TextWrapping.Wrap,
+                Visibility = _app.CurrentSettings.MicDirectMode ? Visibility.Visible : Visibility.Collapsed
+            };
+            UpdateMicTipText();
+
+            _cbMicDirect.Checked += (s, e) =>
+            {
+                if (_app.CurrentSettings.MicDirectMode) return;
+                _app.CurrentSettings.MicDirectMode = true;
+                _app.CurrentSettings.Save();
+                UpdateMicTipText();
+                _tbMicTip.Visibility = Visibility.Visible;
+                if (_app.IsScrcpyConnected)
+                {
+                    _app.ReloadAudioStreamAsync("已开启: 手机麦克风直连电脑");
+                }
+            };
+            _cbMicDirect.Unchecked += (s, e) =>
+            {
+                if (!_app.CurrentSettings.MicDirectMode) return;
+                _app.CurrentSettings.MicDirectMode = false;
+                _app.CurrentSettings.Save();
+                _tbMicTip.Visibility = Visibility.Collapsed;
+                if (_app.IsScrcpyConnected)
+                {
+                    _app.ReloadAudioStreamAsync("已恢复: 手机系统音频直通");
+                }
+            };
+            optsPanel.Children.Add(_cbMicDirect);
+            optsPanel.Children.Add(_tbMicTip);
 
             _cbAutoConnect = new CheckBox
             {
@@ -4677,6 +5061,15 @@ namespace WiFiAudioConnector
                 _cbMutePhone.IsEnabled = isScrcpy;
                 _cbMutePhone.Opacity = isScrcpy ? 1.0 : 0.35;
             }
+            if (_cbMicDirect != null)
+            {
+                _cbMicDirect.IsEnabled = isScrcpy;
+                _cbMicDirect.Opacity = isScrcpy ? 1.0 : 0.35;
+            }
+            if (_tbMicTip != null)
+            {
+                _tbMicTip.Opacity = isScrcpy ? 1.0 : 0.35;
+            }
             if (_tbColon != null)
             {
                 _tbColon.Visibility = (isBluetooth || isUsb) ? Visibility.Collapsed : Visibility.Visible;
@@ -4687,6 +5080,26 @@ namespace WiFiAudioConnector
             }
         }
 
+        private void UpdateMicTipText()
+        {
+            if (_tbMicTip == null) return;
+            string matchingMic;
+            string vRender = WindowsAudioSessionController.FindVirtualAudioRenderDevice(out matchingMic);
+            if (!string.IsNullOrEmpty(vRender))
+            {
+                _tbMicTip.Text = string.Format("🎙️ 已智能绑定虚拟声卡: {0}\n💡 微信/QQ/会议/游戏等语音软件，请将录音输入麦克风选择为:\n   「{1}」", vRender, matchingMic ?? vRender);
+            }
+            else
+            {
+                _tbMicTip.Text = "🎙️ 未检测到虚拟声卡 (当前声音由电脑耳机/扬声器监听播放)\n💡 建议安装免费虚拟声卡(如 VB-CABLE)即可将手机麦克风输入给微信/开黑软件。";
+            }
+        }
+
+        public DeviceItem GetSelectedDevice()
+        {
+            return _cbDevices != null ? _cbDevices.SelectedItem as DeviceItem : null;
+        }
+
         private void OnDeviceSelectionChanged(object sender, SelectionChangedEventArgs e)
         {
             var item = _cbDevices.SelectedItem as DeviceItem;
@@ -4694,6 +5107,19 @@ namespace WiFiAudioConnector
 
             UpdateScrcpyControlsState(item.IsBluetooth, item.IsUsb);
             RefreshBatteryForSelectedDevice(item);
+
+            // Update connect button text and color based on this specific device's connection status
+            bool isSelConn = _app.IsTargetConnected(item.Target);
+            if (isSelConn)
+            {
+                _btnConnect.Content = "断开此设备";
+                _btnConnect.Background = new SolidColorBrush(Color.FromArgb(220, 215, 60, 60));
+            }
+            else
+            {
+                _btnConnect.Content = (_app.IsScrcpyConnected || _app.IsBluetoothConnected) ? "连接此设备 (双路并发)" : "一键连接";
+                _btnConnect.Background = new SolidColorBrush(Color.FromArgb(255, 20, 120, 240));
+            }
 
             if (item.IsCustom)
             {
@@ -4780,61 +5206,68 @@ namespace WiFiAudioConnector
             }
         }
 
-        public void UpdateState(ConnectionState state)
+        public void UpdateUIState()
         {
             Action act = () =>
             {
-                if (state == ConnectionState.Connected)
+                bool scrcpyOn = _app.IsScrcpyConnected;
+                bool btOn = _app.IsBluetoothConnected;
+
+                if (scrcpyOn && btOn)
+                {
+                    _statusBadge.Background = new SolidColorBrush(Color.FromArgb(220, 16, 185, 129));
+                    _statusText.Text = string.Format("双路并发中 ({0} + {1})", _app.CurrentScrcpyDeviceName ?? "Wi-Fi", _app.CurrentBtDeviceName ?? "蓝牙");
+                }
+                else if (scrcpyOn)
                 {
                     _statusBadge.Background = new SolidColorBrush(Color.FromArgb(200, 35, 170, 75));
-                    string desc;
-                    if (_app.IsBluetoothConnected)
+                    if (_app.CurrentSettings.MicDirectMode)
                     {
-                        desc = "已连接 (蓝牙 A2DP 直通)";
-                        UpdateScrcpyControlsState(true, false);
-                        if (_batteryBadge != null) _batteryBadge.Visibility = Visibility.Collapsed;
+                        _statusText.Text = "已连接 (手机麦克风直连)";
                     }
                     else
                     {
-                        desc = _app.CurrentSettings.Codec == "raw" ? "已连接 (Raw PCM 无损)" : "已连接 (Opus)";
-                        bool isUsb = !string.IsNullOrEmpty(_app.CurrentSettings.Target) && !_app.CurrentSettings.Target.Contains(":");
-                        UpdateScrcpyControlsState(false, isUsb);
-                        RefreshBatteryForSelectedDevice();
+                        _statusText.Text = _app.CurrentSettings.Codec == "raw" ? "已连接 (Raw PCM 无损)" : "已连接 (Opus)";
                     }
-                    _statusText.Text = desc;
-                    _btnConnect.Content = "断开连接";
-                    _btnConnect.Background = new SolidColorBrush(Color.FromArgb(220, 215, 60, 60));
                 }
-                else if (state == ConnectionState.Connecting)
+                else if (btOn)
                 {
-                    _statusBadge.Background = new SolidColorBrush(Color.FromArgb(200, 215, 150, 20));
-                    _statusText.Text = "正在连接...";
-                    _btnConnect.Content = "连接中...";
-                    _btnConnect.Background = new SolidColorBrush(Color.FromArgb(180, 120, 120, 120));
-                    if (_batteryBadge != null) _batteryBadge.Visibility = Visibility.Collapsed;
+                    _statusBadge.Background = new SolidColorBrush(Color.FromArgb(200, 35, 170, 75));
+                    _statusText.Text = string.Format("已连接 (蓝牙 A2DP: {0})", _app.CurrentBtDeviceName ?? "设备");
                 }
                 else
                 {
                     _statusBadge.Background = new SolidColorBrush(Color.FromArgb(100, 100, 100, 100));
                     _statusText.Text = "未连接";
-                    _btnConnect.Content = "一键连接";
-                    _btnConnect.Background = new SolidColorBrush(Color.FromArgb(255, 20, 120, 240));
+                }
 
-                    var sel = _cbDevices != null ? _cbDevices.SelectedItem as DeviceItem : null;
-                    if (sel != null)
-                    {
-                        UpdateScrcpyControlsState(sel.IsBluetooth, sel.IsUsb);
-                        RefreshBatteryForSelectedDevice(sel);
-                    }
-                    else
-                    {
-                        if (_batteryBadge != null) _batteryBadge.Visibility = Visibility.Collapsed;
-                    }
+                var sel = _cbDevices != null ? _cbDevices.SelectedItem as DeviceItem : null;
+                bool isSelConnected = (sel != null && !string.IsNullOrEmpty(sel.Target) && _app.IsTargetConnected(sel.Target));
+
+                if (isSelConnected)
+                {
+                    _btnConnect.Content = "断开此设备";
+                    _btnConnect.Background = new SolidColorBrush(Color.FromArgb(220, 215, 60, 60));
+                }
+                else
+                {
+                    _btnConnect.Content = (scrcpyOn || btOn) ? "连接此设备 (双路并发)" : "一键连接";
+                    _btnConnect.Background = new SolidColorBrush(Color.FromArgb(255, 20, 120, 240));
+                }
+
+                if (sel != null)
+                {
+                    UpdateScrcpyControlsState(sel.IsBluetooth, sel.IsUsb);
+                    RefreshBatteryForSelectedDevice(sel);
+                }
+                else
+                {
+                    if (_batteryBadge != null) _batteryBadge.Visibility = Visibility.Collapsed;
                 }
 
                 if (_btnMediaPrev != null && _btnMediaPlayPause != null && _btnMediaNext != null)
                 {
-                    bool mediaEnabled = (state == ConnectionState.Connected) && !_app.IsBluetoothConnected;
+                    bool mediaEnabled = scrcpyOn;
                     _btnMediaPrev.IsEnabled = mediaEnabled;
                     _btnMediaPlayPause.IsEnabled = mediaEnabled;
                     _btnMediaNext.IsEnabled = mediaEnabled;
@@ -4843,10 +5276,42 @@ namespace WiFiAudioConnector
                     _btnMediaPlayPause.Opacity = op;
                     _btnMediaNext.Opacity = op;
                 }
+
+                if (_cbDevices != null && _deviceList != null)
+                {
+                    try
+                    {
+                        var curSel = _cbDevices.SelectedItem;
+                        _cbDevices.Items.Refresh();
+                        _cbDevices.SelectedItem = curSel;
+                    }
+                    catch { }
+                }
             };
 
             if (CheckAccess()) act();
             else Dispatcher.BeginInvoke(act);
+        }
+
+        public void UpdateState(ConnectionState state)
+        {
+            if (state == ConnectionState.Connecting)
+            {
+                Action act = () =>
+                {
+                    _statusBadge.Background = new SolidColorBrush(Color.FromArgb(200, 215, 150, 20));
+                    _statusText.Text = "正在连接...";
+                    _btnConnect.Content = "连接中...";
+                    _btnConnect.Background = new SolidColorBrush(Color.FromArgb(180, 120, 120, 120));
+                    if (_batteryBadge != null) _batteryBadge.Visibility = Visibility.Collapsed;
+                };
+                if (CheckAccess()) act();
+                else Dispatcher.BeginInvoke(act);
+            }
+            else
+            {
+                UpdateUIState();
+            }
         }
 
         private Button CreateMediaButton(string text, Action onClick)
