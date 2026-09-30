@@ -2540,7 +2540,7 @@ namespace WiFiAudioConnector
                     int bufferMs = 50;
                     if (_settings.LatencyMode == "game")
                     {
-                        bufferMs = isTcp ? 30 : 10;
+                        bufferMs = 30;
                     }
                     else if (_settings.LatencyMode == "smooth")
                     {
@@ -2583,7 +2583,7 @@ namespace WiFiAudioConnector
                 UpdateTrayIcon(true);
                 string desc = _settings.Codec == "raw" ? "Raw PCM 无损" : "Opus 320K";
                 string modeTag = isTcp ? "Wi-Fi 无线" : "USB 有线";
-                int curBuffer = (_settings.LatencyMode == "game") ? (isTcp ? 30 : 10) : ((_settings.LatencyMode == "smooth") ? 80 : 50);
+                int curBuffer = (_settings.LatencyMode == "game") ? 30 : ((_settings.LatencyMode == "smooth") ? 80 : 50);
                 _notifyIcon.Text = string.Format("WiFi 音频连接器 - {0} [{1}] (已连接)", _settings.DeviceName, modeTag);
                 _flyout.UpdateState(ConnectionState.Connected);
                 StartPhoneVolumeSync(target, _scrcpyProc.Id);
@@ -3803,7 +3803,7 @@ namespace WiFiAudioConnector
             _rbLatencyGame = new RadioButton
             {
                 GroupName = "LatencyGroup",
-                Content = "⚡ 电竞极速档 (Wi-Fi 30ms / USB 10ms - 音画近乎完全同步)",
+                Content = "⚡ 电竞极速档 (30ms - 音画近乎完全同步)",
                 Foreground = System.Windows.Media.Brushes.White,
                 FontSize = 11,
                 Margin = new Thickness(0, 2, 0, 4),
@@ -3816,9 +3816,7 @@ namespace WiFiAudioConnector
                 _app.CurrentSettings.Save();
                 if (_app.IsConnected && !_app.IsBluetoothConnected)
                 {
-                    bool isUsb = !string.IsNullOrEmpty(_app.CurrentActiveTarget) && !_app.CurrentActiveTarget.Contains(":");
-                    string desc = isUsb ? "电竞极速档 (USB 10ms)" : "电竞极速档 (Wi-Fi 30ms)";
-                    _app.ReloadAudioStreamAsync("已切换延迟: " + desc);
+                    _app.ReloadAudioStreamAsync("已切换延迟: 电竞极速档 (30ms)");
                 }
             };
             qualityPanel.Children.Add(_rbLatencyGame);
