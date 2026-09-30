@@ -61,6 +61,13 @@ namespace WiFiAudioConnector
         }
     }
 
+    public class BatteryInfo
+    {
+        public int Level = -1;
+        public bool IsCharging = false;
+        public string ChargeType = "";
+    }
+
     public class DeviceHotkeyBinding
     {
         public string Target { get; set; }        // "192.168.31.239:5555" or "a22280af" or Bluetooth ID
@@ -1913,6 +1920,12 @@ namespace WiFiAudioConnector
         private bool _hasPendingPhoneSync = false;
         private bool _isPhoneSyncWorkerRunning = false;
 
+        private CancellationTokenSource _batteryCts = null;
+        private BatteryInfo _lastBatteryInfo = null;
+        public BatteryInfo LastBatteryInfo { get { return _lastBatteryInfo; } }
+        private bool _hasAlertedLowBattery = false;
+        private DispatcherTimer _singleClickTimer = null;
+
         public static void LogLine(string s)
         {
             try
@@ -2016,6 +2029,10 @@ namespace WiFiAudioConnector
             _notifyIcon.Visible = true;
 
             var menu = new ContextMenuStrip();
+            menu.Items.Add("⏯ 播放 / 暂停 (中键点击)", null, (s, e) => SendMediaKey(85, "⏯ 播放 / 暂停"));
+            menu.Items.Add("⏮ 上一首 (左键双击)", null, (s, e) => SendMediaKey(88, "⏮ 上一首"));
+            menu.Items.Add("⏭ 下一首 (右键双击)", null, (s, e) => SendMediaKey(87, "⏭ 下一首"));
+            menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("连接当前设备", null, (s, e) => ConnectAsync());
             menu.Items.Add("断开连接", null, (s, e) => Disconnect());
             menu.Items.Add("扫描局域网、USB与蓝牙设备", null, (s, e) =>
@@ -2052,12 +2069,37 @@ namespace WiFiAudioConnector
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("退出", null, (s, e) => ExitApp());
 
+            _singleClickTimer = new DispatcherTimer();
+            _singleClickTimer.Interval = TimeSpan.FromMilliseconds(220);
+            _singleClickTimer.Tick += (s, e) =>
+            {
+                _singleClickTimer.Stop();
+                ToggleFlyout();
+            };
+
             _notifyIcon.ContextMenuStrip = menu;
             _notifyIcon.MouseClick += (s, e) =>
             {
                 if (e.Button == MouseButtons.Left)
                 {
-                    ToggleFlyout();
+                    _singleClickTimer.Stop();
+                    _singleClickTimer.Start();
+                }
+                else if (e.Button == MouseButtons.Middle)
+                {
+                    SendMediaKey(85, "⏯ 播放 / 暂停");
+                }
+            };
+            _notifyIcon.MouseDoubleClick += (s, e) =>
+            {
+                _singleClickTimer.Stop();
+                if (e.Button == MouseButtons.Left)
+                {
+                    SendMediaKey(88, "⏮ 上一首");
+                }
+                else if (e.Button == MouseButtons.Right)
+                {
+                    SendMediaKey(87, "⏭ 下一首");
                 }
             };
             _trayWheelController = new TrayWheelVolumeController(_notifyIcon, OnTrayWheelVolumeDelta);
@@ -2587,6 +2629,7 @@ namespace WiFiAudioConnector
                 _notifyIcon.Text = string.Format("WiFi 音频连接器 - {0} [{1}] (已连接)", _settings.DeviceName, modeTag);
                 _flyout.UpdateState(ConnectionState.Connected);
                 StartPhoneVolumeSync(target, _scrcpyProc.Id);
+                StartBatteryMonitor(target);
                 if (_volumeOsd != null)
                 {
                     _volumeOsd.ShowHint("音频流已就绪", string.Format("{0} [{1}]\n{2} | {3}ms 延迟缓冲", _settings.DeviceName, modeTag, desc, curBuffer));
@@ -2609,11 +2652,14 @@ namespace WiFiAudioConnector
                     string targetToMute = _currentActiveTarget;
                     _currentActiveTarget = null;
                     StopPhoneVolumeSync();
+                    StopBatteryMonitor();
+                    _lastBatteryInfo = null;
                     Dispatcher.BeginInvoke(new Action(() =>
                     {
                         UpdateTrayIcon(false);
                         _notifyIcon.Text = "WiFi 音频连接器 (未连接)";
                         _flyout.UpdateState(ConnectionState.Disconnected);
+                        _flyout.UpdateBatteryUI(null);
                     }));
 
                     if (_settings.SyncPhoneVolume && _settings.MuteOnDisconnect && !string.IsNullOrEmpty(targetToMute))
@@ -2652,6 +2698,7 @@ namespace WiFiAudioConnector
                 _notifyIcon.Text = "WiFi 音频连接器 (正在平滑切换参数...)";
 
                 StopPhoneVolumeSync();
+                StopBatteryMonitor();
 
                 // 1. 断连前先静音手机媒体音量，彻底消除重连间隙可能发生的设备扬声器声音外露
                 if (!string.IsNullOrEmpty(target))
@@ -2696,6 +2743,7 @@ namespace WiFiAudioConnector
                 UpdateTrayIcon(false);
                 _notifyIcon.Text = "WiFi 音频连接器 (未连接)";
                 _flyout.UpdateState(ConnectionState.Disconnected);
+                _flyout.UpdateBatteryUI(null);
                 ShowNotification("蓝牙音频已断开", string.Format("{0} [蓝牙]\n音频直通已关闭", devName), ToolTipIcon.Info);
                 if (_flyout != null) _flyout.SyncCurrentDeviceToUI();
                 return;
@@ -2704,6 +2752,9 @@ namespace WiFiAudioConnector
             string targetToMute = _currentActiveTarget;
             _currentActiveTarget = null;
             StopPhoneVolumeSync();
+            StopBatteryMonitor();
+            _lastBatteryInfo = null;
+            if (_flyout != null) _flyout.UpdateBatteryUI(null);
 
             if (_settings.SyncPhoneVolume && _settings.MuteOnDisconnect && !string.IsNullOrEmpty(targetToMute))
             {
@@ -2742,6 +2793,22 @@ namespace WiFiAudioConnector
             if (_flyout != null)
             {
                 _flyout.SyncNotificationCheckbox();
+            }
+            if (IsConnected && !_isBluetoothConnected && !string.IsNullOrEmpty(_currentActiveTarget))
+            {
+                Task.Run(() =>
+                {
+                    var info = QueryPhoneBattery(_currentActiveTarget);
+                    if (info != null && info.Level >= 0)
+                    {
+                        _lastBatteryInfo = info;
+                        Dispatcher.BeginInvoke(new Action(() =>
+                        {
+                            if (_flyout != null) _flyout.UpdateBatteryUI(info);
+                            UpdateTrayTooltipWithBattery();
+                        }));
+                    }
+                });
             }
             _flyout.Show();
             _flyout.Activate();
@@ -3221,6 +3288,187 @@ namespace WiFiAudioConnector
             catch { }
         }
 
+        public BatteryInfo QueryPhoneBattery(string target)
+        {
+            if (string.IsNullOrEmpty(target) || _isBluetoothConnected) return null;
+            try
+            {
+                string adbPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "adb.exe");
+                var psi = new ProcessStartInfo
+                {
+                    FileName = adbPath,
+                    Arguments = string.Format("-s {0} shell dumpsys battery", target),
+                    CreateNoWindow = true,
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true
+                };
+                using (var p = Process.Start(psi))
+                {
+                    string outStr = p.StandardOutput.ReadToEnd();
+                    p.WaitForExit(1500);
+
+                    var info = new BatteryInfo();
+                    var mLevel = Regex.Match(outStr, @"level:\s*(\d+)");
+                    if (mLevel.Success)
+                    {
+                        info.Level = int.Parse(mLevel.Groups[1].Value);
+                    }
+
+                    var mStatus = Regex.Match(outStr, @"status:\s*(\d+)");
+                    int status = mStatus.Success ? int.Parse(mStatus.Groups[1].Value) : 0;
+
+                    bool ac = Regex.IsMatch(outStr, @"AC powered:\s*true", RegexOptions.IgnoreCase);
+                    bool usb = Regex.IsMatch(outStr, @"USB powered:\s*true", RegexOptions.IgnoreCase);
+                    bool wireless = Regex.IsMatch(outStr, @"Wireless powered:\s*true", RegexOptions.IgnoreCase);
+
+                    info.IsCharging = (status == 2) || ac || usb || wireless;
+                    if (status == 5 || info.Level == 100) info.ChargeType = "充满";
+                    else if (wireless) info.ChargeType = "无线";
+                    else if (ac) info.ChargeType = "快充";
+                    else if (usb) info.ChargeType = "USB";
+                    else if (info.IsCharging) info.ChargeType = "充电中";
+
+                    return info;
+                }
+            }
+            catch { }
+            return null;
+        }
+
+        public void StartBatteryMonitor(string target)
+        {
+            StopBatteryMonitor();
+            if (string.IsNullOrEmpty(target) || _isBluetoothConnected) return;
+
+            _batteryCts = new CancellationTokenSource();
+            var token = _batteryCts.Token;
+
+            Task.Run(async () =>
+            {
+                while (!token.IsCancellationRequested && IsConnected && !_isBluetoothConnected)
+                {
+                    try
+                    {
+                        var info = QueryPhoneBattery(target);
+                        if (info != null && info.Level >= 0)
+                        {
+                            _lastBatteryInfo = info;
+                            Dispatcher.BeginInvoke(new Action(() =>
+                            {
+                                if (_flyout != null)
+                                {
+                                    _flyout.UpdateBatteryUI(info);
+                                }
+                                UpdateTrayTooltipWithBattery();
+                            }));
+
+                            if (info.Level <= 20 && !info.IsCharging && !_hasAlertedLowBattery)
+                            {
+                                _hasAlertedLowBattery = true;
+                                ShowNotification("手机低电量提醒", string.Format("手机当前电量为 {0}% (未充电)，请及时充电以防音频推流中断", info.Level), ToolTipIcon.Warning);
+                            }
+                            else if (info.Level > 25 || info.IsCharging)
+                            {
+                                _hasAlertedLowBattery = false;
+                            }
+                        }
+                    }
+                    catch { }
+
+                    try
+                    {
+                        await Task.Delay(30000, token);
+                    }
+                    catch { break; }
+                }
+            });
+        }
+
+        public void StopBatteryMonitor()
+        {
+            try
+            {
+                if (_batteryCts != null)
+                {
+                    _batteryCts.Cancel();
+                    _batteryCts.Dispose();
+                }
+            }
+            catch { }
+            _batteryCts = null;
+        }
+
+        public void UpdateTrayTooltipWithBattery()
+        {
+            if (!IsConnected || _notifyIcon == null) return;
+            try
+            {
+                if (_isBluetoothConnected)
+                {
+                    string btText = string.Format("WiFi 音频连接器 (已连接 [蓝牙]: {0})", _settings.DeviceName);
+                    if (btText.Length >= 63) btText = btText.Substring(0, 60) + "...";
+                    _notifyIcon.Text = btText;
+                    return;
+                }
+
+                string modeTag = (!string.IsNullOrEmpty(_currentActiveTarget) && _currentActiveTarget.Contains(":")) ? "Wi-Fi" : "USB";
+                string batStr = "";
+                if (_lastBatteryInfo != null && _lastBatteryInfo.Level >= 0)
+                {
+                    batStr = string.Format(" {0}{1}%", _lastBatteryInfo.IsCharging ? "⚡" : "🔋", _lastBatteryInfo.Level);
+                }
+                string text = string.Format("WiFi 音频连接器 - {0} [{1}]{2} (已连接)", _settings.DeviceName, modeTag, batStr);
+                if (text.Length >= 63)
+                {
+                    text = text.Substring(0, 60) + "...";
+                }
+                _notifyIcon.Text = text;
+            }
+            catch { }
+        }
+
+        public void SendMediaKey(int keyCode, string actionName)
+        {
+            if (!IsConnected || _isBluetoothConnected)
+            {
+                if (_volumeOsd != null)
+                {
+                    _volumeOsd.ShowHint("媒体控制", _isBluetoothConnected ? "蓝牙直通模式请直接在手机端操作" : "未连接设备");
+                }
+                return;
+            }
+
+            string target = _currentActiveTarget;
+            if (string.IsNullOrEmpty(target)) target = _settings.Target;
+            if (string.IsNullOrEmpty(target)) return;
+
+            if (_volumeOsd != null)
+            {
+                _volumeOsd.ShowHint("媒体控制", actionName);
+            }
+
+            Task.Run(() =>
+            {
+                try
+                {
+                    string adbPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "adb.exe");
+                    string shellCmd = string.Format("input keyevent {0}", keyCode);
+                    var psi = new ProcessStartInfo
+                    {
+                        FileName = adbPath,
+                        Arguments = string.Format("-s {0} shell \"{1}\"", target, shellCmd),
+                        CreateNoWindow = true,
+                        UseShellExecute = false
+                    };
+                    using (var p = Process.Start(psi))
+                    {
+                        p.WaitForExit(1000);
+                    }
+                }
+                catch { }
+            });
+        }
+
         public void ExitApp()
         {
             Disconnect();
@@ -3266,6 +3514,8 @@ namespace WiFiAudioConnector
         private App _app;
         private Border _statusBadge;
         private TextBlock _statusText;
+        private Border _batteryBadge;
+        private TextBlock _batteryText;
         private Button _btnConnect;
         private ComboBox _cbDevices;
         private Button _btnScan;
@@ -3282,6 +3532,9 @@ namespace WiFiAudioConnector
         private Slider _sliderVolume;
         private TextBlock _txtVolumePercent;
         private Button _btnMute;
+        private Button _btnMediaPrev;
+        private Button _btnMediaPlayPause;
+        private Button _btnMediaNext;
         private bool _isUpdatingVolumeUI = false;
         private bool _isUserDragging = false;
         private TextBox _tbIp;
@@ -3309,7 +3562,7 @@ namespace WiFiAudioConnector
         private void BuildUI()
         {
             Width = 370;
-            Height = 730;
+            Height = 765;
             WindowStyle = WindowStyle.None;
             AllowsTransparency = true;
             Background = System.Windows.Media.Brushes.Transparent;
@@ -3417,7 +3670,28 @@ namespace WiFiAudioConnector
             };
             _statusBadge.Child = _statusText;
             DockPanel.SetDock(_statusBadge, Dock.Right);
+
+            _batteryBadge = new Border
+            {
+                CornerRadius = new CornerRadius(4),
+                Padding = new Thickness(6, 2, 6, 2),
+                Background = new SolidColorBrush(Color.FromArgb(140, 20, 130, 75)),
+                HorizontalAlignment = HorizontalAlignment.Right,
+                Margin = new Thickness(0, 0, 6, 0),
+                Visibility = Visibility.Collapsed
+            };
+            _batteryText = new TextBlock
+            {
+                Text = "🔋 --%",
+                FontSize = 11,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = System.Windows.Media.Brushes.White
+            };
+            _batteryBadge.Child = _batteryText;
+            DockPanel.SetDock(_batteryBadge, Dock.Right);
+
             row1.Children.Add(_statusBadge);
+            row1.Children.Add(_batteryBadge);
             row1.Children.Add(devTitle);
             devicePanel.Children.Add(row1);
 
@@ -3735,6 +4009,25 @@ namespace WiFiAudioConnector
             };
             sliderRow.Children.Add(_sliderVolume);
             volumePanel.Children.Add(sliderRow);
+
+            // Media Control Quick Buttons
+            var mediaRow = new Grid { Margin = new Thickness(0, 6, 0, 0) };
+            mediaRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            mediaRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            mediaRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+            _btnMediaPrev = CreateMediaButton("⏮ 上一首", () => _app.SendMediaKey(88, "⏮ 上一首"));
+            _btnMediaPlayPause = CreateMediaButton("⏯ 播放/暂停", () => _app.SendMediaKey(85, "⏯ 播放 / 暂停"));
+            _btnMediaNext = CreateMediaButton("⏭ 下一首", () => _app.SendMediaKey(87, "⏭ 下一首"));
+
+            Grid.SetColumn(_btnMediaPrev, 0);
+            Grid.SetColumn(_btnMediaPlayPause, 1);
+            Grid.SetColumn(_btnMediaNext, 2);
+
+            mediaRow.Children.Add(_btnMediaPrev);
+            mediaRow.Children.Add(_btnMediaPlayPause);
+            mediaRow.Children.Add(_btnMediaNext);
+            volumePanel.Children.Add(mediaRow);
 
             _volumeCard.Child = volumePanel;
             root.Children.Add(_volumeCard);
@@ -4224,12 +4517,17 @@ namespace WiFiAudioConnector
                     {
                         desc = "已连接 (蓝牙 A2DP 直通)";
                         UpdateScrcpyControlsState(true, false);
+                        if (_batteryBadge != null) _batteryBadge.Visibility = Visibility.Collapsed;
                     }
                     else
                     {
                         desc = _app.CurrentSettings.Codec == "raw" ? "已连接 (Raw PCM 无损)" : "已连接 (Opus)";
                         bool isUsb = !string.IsNullOrEmpty(_app.CurrentSettings.Target) && !_app.CurrentSettings.Target.Contains(":");
                         UpdateScrcpyControlsState(false, isUsb);
+                        if (_batteryBadge != null && _app.LastBatteryInfo != null && _app.LastBatteryInfo.Level >= 0)
+                        {
+                            UpdateBatteryUI(_app.LastBatteryInfo);
+                        }
                     }
                     _statusText.Text = desc;
                     _btnConnect.Content = "断开连接";
@@ -4241,6 +4539,7 @@ namespace WiFiAudioConnector
                     _statusText.Text = "正在连接...";
                     _btnConnect.Content = "连接中...";
                     _btnConnect.Background = new SolidColorBrush(Color.FromArgb(180, 120, 120, 120));
+                    if (_batteryBadge != null) _batteryBadge.Visibility = Visibility.Collapsed;
                 }
                 else
                 {
@@ -4248,6 +4547,7 @@ namespace WiFiAudioConnector
                     _statusText.Text = "未连接";
                     _btnConnect.Content = "一键连接";
                     _btnConnect.Background = new SolidColorBrush(Color.FromArgb(255, 20, 120, 240));
+                    if (_batteryBadge != null) _batteryBadge.Visibility = Visibility.Collapsed;
 
                     var sel = _cbDevices != null ? _cbDevices.SelectedItem as DeviceItem : null;
                     if (sel != null)
@@ -4255,10 +4555,83 @@ namespace WiFiAudioConnector
                         UpdateScrcpyControlsState(sel.IsBluetooth, sel.IsUsb);
                     }
                 }
+
+                if (_btnMediaPrev != null && _btnMediaPlayPause != null && _btnMediaNext != null)
+                {
+                    bool mediaEnabled = (state == ConnectionState.Connected) && !_app.IsBluetoothConnected;
+                    _btnMediaPrev.IsEnabled = mediaEnabled;
+                    _btnMediaPlayPause.IsEnabled = mediaEnabled;
+                    _btnMediaNext.IsEnabled = mediaEnabled;
+                    double op = mediaEnabled ? 1.0 : 0.4;
+                    _btnMediaPrev.Opacity = op;
+                    _btnMediaPlayPause.Opacity = op;
+                    _btnMediaNext.Opacity = op;
+                }
             };
 
             if (CheckAccess()) act();
             else Dispatcher.BeginInvoke(act);
+        }
+
+        private Button CreateMediaButton(string text, Action onClick)
+        {
+            var btn = new Button
+            {
+                Content = text,
+                Height = 26,
+                FontSize = 11,
+                Background = new SolidColorBrush(Color.FromArgb(160, 48, 52, 65)),
+                Foreground = System.Windows.Media.Brushes.White,
+                BorderThickness = new Thickness(0),
+                Cursor = System.Windows.Input.Cursors.Hand,
+                Margin = new Thickness(2, 0, 2, 0)
+            };
+            btn.Click += (s, e) => onClick();
+            return btn;
+        }
+
+        public void UpdateBatteryUI(BatteryInfo info)
+        {
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                if (_batteryBadge == null || _batteryText == null) return;
+                if (info == null || info.Level < 0 || !_app.IsConnected || _app.IsBluetoothConnected)
+                {
+                    _batteryBadge.Visibility = Visibility.Collapsed;
+                    return;
+                }
+
+                _batteryBadge.Visibility = Visibility.Visible;
+                string icon = info.IsCharging ? "⚡" : (info.Level <= 20 ? "🪫" : "🔋");
+                string chargeDesc = "未充电";
+                if (info.IsCharging)
+                {
+                    if (info.ChargeType == "充满") chargeDesc = "已充满";
+                    else if (info.ChargeType == "无线") chargeDesc = "无线充电中";
+                    else if (info.ChargeType == "快充") chargeDesc = "快充中";
+                    else if (info.ChargeType == "USB") chargeDesc = "USB充电中";
+                    else chargeDesc = "充电中";
+                }
+                else if (info.Level <= 20)
+                {
+                    chargeDesc = "电量偏低";
+                }
+
+                _batteryText.Text = string.Format("{0} {1}% ({2})", icon, info.Level, chargeDesc);
+
+                if (info.IsCharging)
+                {
+                    _batteryBadge.Background = new SolidColorBrush(Color.FromArgb(140, 20, 130, 75));
+                }
+                else if (info.Level <= 20)
+                {
+                    _batteryBadge.Background = new SolidColorBrush(Color.FromArgb(180, 200, 50, 45));
+                }
+                else
+                {
+                    _batteryBadge.Background = new SolidColorBrush(Color.FromArgb(130, 40, 65, 95));
+                }
+            }));
         }
 
         public void SyncCurrentDeviceToUI()
