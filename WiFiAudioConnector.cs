@@ -2844,8 +2844,6 @@ namespace WiFiAudioConnector
         private Slider _sliderVolume;
         private TextBlock _txtVolumePercent;
         private Button _btnMute;
-        private CheckBox _cbSyncPhoneVolume;
-        private CheckBox _cbMuteOnDisconnect;
         private bool _isUpdatingVolumeUI = false;
         private bool _isUserDragging = false;
         private TextBox _tbIp;
@@ -2873,7 +2871,7 @@ namespace WiFiAudioConnector
         private void BuildUI()
         {
             Width = 370;
-            Height = 705;
+            Height = 650;
             WindowStyle = WindowStyle.None;
             AllowsTransparency = true;
             Background = System.Windows.Media.Brushes.Transparent;
@@ -3299,52 +3297,6 @@ namespace WiFiAudioConnector
             };
             sliderRow.Children.Add(_sliderVolume);
             volumePanel.Children.Add(sliderRow);
-
-            _cbSyncPhoneVolume = new CheckBox
-            {
-                Content = "手机按键实时联动 (按手机物理音量键调节电脑声音)",
-                Foreground = System.Windows.Media.Brushes.White,
-                FontSize = 11,
-                Margin = new Thickness(0, 2, 0, 0),
-                IsChecked = _app.CurrentSettings.SyncPhoneVolume
-            };
-
-            _cbMuteOnDisconnect = new CheckBox
-            {
-                Content = "└ 仅开启联动时生效：断开后手机自动静音 (防声音外放)",
-                Foreground = new SolidColorBrush(Color.FromArgb(220, 210, 220, 235)),
-                FontSize = 10.5,
-                Margin = new Thickness(14, 4, 0, 0),
-                IsChecked = _app.CurrentSettings.MuteOnDisconnect,
-                IsEnabled = _app.CurrentSettings.SyncPhoneVolume
-            };
-
-            _cbSyncPhoneVolume.Checked += (s, e) =>
-            {
-                _app.CurrentSettings.SyncPhoneVolume = true;
-                _app.CurrentSettings.Save();
-                if (_cbMuteOnDisconnect != null) _cbMuteOnDisconnect.IsEnabled = true;
-            };
-            _cbSyncPhoneVolume.Unchecked += (s, e) =>
-            {
-                _app.CurrentSettings.SyncPhoneVolume = false;
-                _app.CurrentSettings.Save();
-                if (_cbMuteOnDisconnect != null) _cbMuteOnDisconnect.IsEnabled = false;
-            };
-
-            _cbMuteOnDisconnect.Checked += (s, e) =>
-            {
-                _app.CurrentSettings.MuteOnDisconnect = true;
-                _app.CurrentSettings.Save();
-            };
-            _cbMuteOnDisconnect.Unchecked += (s, e) =>
-            {
-                _app.CurrentSettings.MuteOnDisconnect = false;
-                _app.CurrentSettings.Save();
-            };
-
-            volumePanel.Children.Add(_cbSyncPhoneVolume);
-            volumePanel.Children.Add(_cbMuteOnDisconnect);
 
             _volumeCard.Child = volumePanel;
             root.Children.Add(_volumeCard);
