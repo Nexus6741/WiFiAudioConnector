@@ -505,7 +505,7 @@ namespace WiFiAudioConnector
                     }
                 }
 
-                string[] virtualKeywords = new string[] { "网易虚拟", "虚拟音频", "Virtual Audio", "CABLE Input", "VoiceMeeter Input", "VB-Audio", "Virtual Cable" };
+                string[] virtualKeywords = new string[] { "手机麦克风", "网易虚拟", "虚拟音频", "Virtual Audio", "CABLE Input", "VoiceMeeter Input", "VB-Audio", "Virtual Cable" };
                 foreach (var kw in virtualKeywords)
                 {
                     foreach (var rName in renderNames)
@@ -1049,12 +1049,17 @@ namespace WiFiAudioConnector
         private const int WS_EX_TOOLWINDOW = 0x00000080;
         private const int WS_EX_NOACTIVATE = 0x08000000;
         private const int GWL_EXSTYLE = -20;
+        private const int SW_SHOWNOACTIVATE = 4;
 
         [DllImport("user32.dll", EntryPoint = "GetWindowLong")]
         private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
 
         [DllImport("user32.dll", EntryPoint = "SetWindowLong")]
         private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
         private TextBlock _iconText;
         private TextBlock _volText;
@@ -1075,6 +1080,7 @@ namespace WiFiAudioConnector
             Topmost = true;
             ShowInTaskbar = false;
             Focusable = false;
+            ShowActivated = false;
             SizeToContent = SizeToContent.WidthAndHeight;
 
             BuildUI();
@@ -1255,7 +1261,19 @@ namespace WiFiAudioConnector
                 BeginAnimation(OpacityProperty, null);
                 Opacity = 1.0;
 
-                if (!IsVisible) Show();
+                if (!IsVisible)
+                {
+                    try
+                    {
+                        var hwnd = new WindowInteropHelper(this).Handle;
+                        if (hwnd != IntPtr.Zero)
+                        {
+                            ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                        }
+                    }
+                    catch { }
+                    Show();
+                }
 
                 _fadeTimer.Stop();
                 _fadeTimer.Interval = TimeSpan.FromMilliseconds(1000);
@@ -1315,7 +1333,19 @@ namespace WiFiAudioConnector
                 BeginAnimation(OpacityProperty, null);
                 Opacity = 1.0;
 
-                if (!IsVisible) Show();
+                if (!IsVisible)
+                {
+                    try
+                    {
+                        var hwnd = new WindowInteropHelper(this).Handle;
+                        if (hwnd != IntPtr.Zero)
+                        {
+                            ShowWindow(hwnd, SW_SHOWNOACTIVATE);
+                        }
+                    }
+                    catch { }
+                    Show();
+                }
 
                 _fadeTimer.Stop();
                 _fadeTimer.Interval = TimeSpan.FromMilliseconds(1800);
@@ -2562,20 +2592,11 @@ namespace WiFiAudioConnector
         {
             Dispatcher.BeginInvoke(new Action(() =>
             {
-                if (_isBluetoothConnected)
+                if (IsScrcpyConnected && _scrcpyProc != null && !_scrcpyProc.HasExited)
                 {
-                    if (_volumeOsd != null)
-                    {
-                        _volumeOsd.ShowHint("蓝牙直通模式", "蓝牙模式请直接在手机端调节音量");
-                    }
-                    return;
-                }
+                    int cur = _settings.MasterVolume;
+                    int newVol = Math.Max(0, Math.Min(100, cur + delta));
 
-                int cur = _settings.MasterVolume;
-                int newVol = Math.Max(0, Math.Min(100, cur + delta));
-
-                if (IsConnected && _scrcpyProc != null && !_scrcpyProc.HasExited)
-                {
                     SetVolumeFromUI(newVol, false);
                     if (_flyout != null)
                     {
@@ -2589,8 +2610,19 @@ namespace WiFiAudioConnector
                         _volumeOsd.ShowVolume(newVol, false, modeTag);
                     }
                 }
+                else if (IsBluetoothConnected)
+                {
+                    if (_volumeOsd != null)
+                    {
+                        _volumeOsd.ShowHint("蓝牙直通模式", "蓝牙模式请直接在手机端调节音量");
+                    }
+                    return;
+                }
                 else
                 {
+                    int cur = _settings.MasterVolume;
+                    int newVol = Math.Max(0, Math.Min(100, cur + delta));
+
                     _settings.MasterVolume = newVol;
                     _settings.IsMuted = false;
                     _settings.Save();
@@ -2958,7 +2990,7 @@ namespace WiFiAudioConnector
             else if (scrcpyOn)
             {
                 string modeTag = (_currentScrcpyTarget != null && _currentScrcpyTarget.Contains(":")) ? "Wi-Fi" : "USB";
-                string roleTag = _settings.MicDirectMode ? "麦克风直连" : "已连接";
+                string roleTag = _settings.MicDirectMode ? "手机麦克风设备" : "已连接";
                 _notifyIcon.Text = TruncateNotifyText(string.Format("WiFi 音频连接器 - {0} [{1}] ({2})", _currentScrcpyDeviceName ?? _settings.DeviceName, modeTag, roleTag));
             }
             else if (btOn)
@@ -3163,8 +3195,8 @@ namespace WiFiAudioConnector
                 string modeTag = isTcp ? "Wi-Fi 无线" : "USB 有线";
                 if (_settings.MicDirectMode)
                 {
-                    string recTip = !string.IsNullOrEmpty(matchingMic) ? string.Format("\n录音输入声卡: {0}", matchingMic) : "\n电脑耳机监听输出 (可配合虚拟声卡开黑)";
-                    ShowNotification("无线麦克风已就绪", string.Format("{0} [{1}]\n已开启手机麦克风直连电脑{2}", devName, modeTag, recTip), ToolTipIcon.Info);
+                    string recTip = !string.IsNullOrEmpty(matchingMic) ? "\n录音输入请选择: 「手机麦克风设备」" : "\n电脑耳机监听输出 (可配合虚拟声卡开黑)";
+                    ShowNotification("手机麦克风已就绪", string.Format("{0} [{1}]\n已开启手机麦克风直连电脑{2}", devName, modeTag, recTip), ToolTipIcon.Info);
                 }
                 else
                 {
@@ -3207,6 +3239,7 @@ namespace WiFiAudioConnector
         }
 
         private bool _isReloading = false;
+        public bool IsReloading { get { return _isReloading; } }
 
         public async void ReloadAudioStreamAsync(string noticeTag = null)
         {
@@ -3248,6 +3281,14 @@ namespace WiFiAudioConnector
                 // 4. 重建连接并在连接就绪后自动恢复设备音量
                 _isReloading = false;
                 ConnectAsync(target, devName);
+
+                Dispatcher.BeginInvoke(new Action(() =>
+                {
+                    if (_flyout != null && _flyout.IsVisible)
+                    {
+                        _flyout.Activate();
+                    }
+                }));
             }
             catch (Exception ex)
             {
@@ -3516,6 +3557,9 @@ namespace WiFiAudioConnector
         public void ShowNotification(string title, string msg, ToolTipIcon icon)
         {
             if (_settings.NotificationMode == "none") return;
+
+            // When Flyout panel is currently open and being interacted with, suppress popup notifications to avoid focus loss
+            if (_flyout != null && _flyout.IsVisible) return;
 
             if (_settings.NotificationMode == "osd")
             {
@@ -4002,7 +4046,7 @@ namespace WiFiAudioConnector
                     {
                         batStr = string.Format(" {0}{1}%", _lastBatteryInfo.IsCharging ? "⚡" : "🔋", _lastBatteryInfo.Level);
                     }
-                    string roleTag = _settings.MicDirectMode ? "麦克风直连" : "已连接";
+                    string roleTag = _settings.MicDirectMode ? "手机麦克风设备" : "已连接";
                     string text = string.Format("WiFi 音频连接器 - {0} [{1}]{2} ({3})", _currentScrcpyDeviceName ?? _settings.DeviceName, modeTag, batStr, roleTag);
                     _notifyIcon.Text = TruncateNotifyText(text);
                 }
@@ -4156,7 +4200,23 @@ namespace WiFiAudioConnector
             Topmost = true;
             ShowInTaskbar = false;
 
-            Deactivated += (s, e) => Hide();
+            Deactivated += (s, e) =>
+            {
+                if (_app != null && _app.IsReloading) return;
+
+                try
+                {
+                    var pt = System.Windows.Forms.Cursor.Position;
+                    if (pt.X >= Left && pt.X <= Left + ActualWidth &&
+                        pt.Y >= Top && pt.Y <= Top + ActualHeight)
+                    {
+                        return;
+                    }
+                }
+                catch { }
+
+                Hide();
+            };
 
             var mainBorder = new Border
             {
@@ -5087,11 +5147,11 @@ namespace WiFiAudioConnector
             string vRender = WindowsAudioSessionController.FindVirtualAudioRenderDevice(out matchingMic);
             if (!string.IsNullOrEmpty(vRender))
             {
-                _tbMicTip.Text = string.Format("🎙️ 已智能绑定虚拟声卡: {0}\n💡 微信/QQ/会议/游戏等语音软件，请将录音输入麦克风选择为:\n   「{1}」", vRender, matchingMic ?? vRender);
+                _tbMicTip.Text = "🎙️ 已智能绑定: 手机麦克风设备\n💡 微信/QQ/会议/游戏等语音软件，请将录音输入麦克风选择为:\n   「手机麦克风设备」";
             }
             else
             {
-                _tbMicTip.Text = "🎙️ 未检测到虚拟声卡 (当前声音由电脑耳机/扬声器监听播放)\n💡 建议安装免费虚拟声卡(如 VB-CABLE)即可将手机麦克风输入给微信/开黑软件。";
+                _tbMicTip.Text = "🎙️ 未检测到手机麦克风设备 (当前声音由电脑耳机/扬声器监听播放)\n💡 建议安装虚拟音频驱动即可将手机麦克风输入给微信/开黑软件。";
             }
         }
 
@@ -5223,7 +5283,7 @@ namespace WiFiAudioConnector
                     _statusBadge.Background = new SolidColorBrush(Color.FromArgb(200, 35, 170, 75));
                     if (_app.CurrentSettings.MicDirectMode)
                     {
-                        _statusText.Text = "已连接 (手机麦克风直连)";
+                        _statusText.Text = "已连接 (手机麦克风设备)";
                     }
                     else
                     {
