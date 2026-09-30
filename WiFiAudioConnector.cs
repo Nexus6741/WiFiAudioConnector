@@ -1121,6 +1121,13 @@ namespace WiFiAudioConnector
         private Process _logcatProc = null;
         private int _phoneMaxVolume = 150;
         private DateTime _lastSliderSetTime = DateTime.MinValue;
+        public DateTime LastSliderSetTime { get { return _lastSliderSetTime; } }
+
+        private readonly object _phoneSyncLock = new object();
+        private int _pendingPhoneIndex = -1;
+        private bool _pendingPhoneMute = false;
+        private bool _hasPendingPhoneSync = false;
+        private bool _isPhoneSyncWorkerRunning = false;
 
         public static void LogLine(string s)
         {
@@ -1645,13 +1652,13 @@ namespace WiFiAudioConnector
         {
             string targetToMute = _currentActiveTarget;
             _currentActiveTarget = null;
+            StopPhoneVolumeSync();
 
             if (_settings.SyncPhoneVolume && _settings.MuteOnDisconnect && !string.IsNullOrEmpty(targetToMute))
             {
                 MutePhoneMedia(targetToMute);
             }
 
-            StopPhoneVolumeSync();
             try
             {
                 if (_scrcpyProc != null && !_scrcpyProc.HasExited)
@@ -1869,26 +1876,30 @@ namespace WiFiAudioConnector
                             int cur = int.Parse(m.Groups[1].Value);
                             int max = int.Parse(m.Groups[3].Value);
                             if (max > 0) _phoneMaxVolume = max;
+
+                            // Always preserve and sync the last saved MasterVolume to phone
                             if (_settings.SyncPhoneVolume)
                             {
-                                int pct = (int)Math.Round((float)cur * 100 / _phoneMaxVolume);
-                                if (pct == 0 && _settings.MasterVolume > 0)
+                                int targetIndex = (int)Math.Round((_settings.MasterVolume / 100.0f) * _phoneMaxVolume);
+                                string cmdArgs;
+                                if (_settings.IsMuted)
                                 {
-                                    int targetIndex = (int)Math.Round((_settings.MasterVolume / 100.0f) * _phoneMaxVolume);
-                                    var psiRestore = new ProcessStartInfo
-                                    {
-                                        FileName = adbPath,
-                                        Arguments = string.Format("-s {0} shell \"cmd audio adj-unmute 3; cmd audio set-volume 3 {1}; cmd media_session volume --stream 3 --set {1}\"", target, targetIndex),
-                                        CreateNoWindow = true,
-                                        UseShellExecute = false
-                                    };
-                                    using (var pRestore = Process.Start(psiRestore)) { pRestore.WaitForExit(1500); }
+                                    cmdArgs = string.Format("-s {0} shell \"cmd audio set-volume 3 0; cmd audio adj-mute 3; cmd media_session volume --stream 3 --set 0\"", target);
                                 }
                                 else
                                 {
-                                    _settings.MasterVolume = Math.Max(0, Math.Min(100, pct));
+                                    cmdArgs = string.Format("-s {0} shell \"cmd audio adj-unmute 3; cmd audio set-volume 3 {1}; cmd media_session volume --stream 3 --set {1}\"", target, targetIndex);
                                 }
+                                var psiRestore = new ProcessStartInfo
+                                {
+                                    FileName = adbPath,
+                                    Arguments = cmdArgs,
+                                    CreateNoWindow = true,
+                                    UseShellExecute = false
+                                };
+                                using (var pRestore = Process.Start(psiRestore)) { pRestore.WaitForExit(1500); }
                             }
+                            _lastSliderSetTime = DateTime.Now;
                             Dispatcher.BeginInvoke(new Action(() =>
                             {
                                 if (_flyout != null) _flyout.UpdateVolumeUI(_settings.MasterVolume, _settings.IsMuted);
@@ -1905,16 +1916,32 @@ namespace WiFiAudioConnector
                         Thread.Sleep(300);
                     }
 
-                    // 2. Start streaming logcat for real-time volume key events
+                    // Clear logcat buffer so past mute events are never replayed
+                    try
+                    {
+                        var psiClear = new ProcessStartInfo
+                        {
+                            FileName = adbPath,
+                            Arguments = string.Format("-s {0} shell logcat -c", target),
+                            CreateNoWindow = true,
+                            UseShellExecute = false
+                        };
+                        using (var pClear = Process.Start(psiClear)) { pClear.WaitForExit(1000); }
+                    }
+                    catch { }
+
+                    // 2. Start streaming logcat for real-time volume key events (-T 1 ensures only new events)
                     var psiLogcat = new ProcessStartInfo
                     {
                         FileName = adbPath,
-                        Arguments = string.Format("-s {0} shell logcat -v raw -s vol.Events:I VolumeSliderController:D", target),
+                        Arguments = string.Format("-s {0} shell logcat -T 1 -v raw -s vol.Events:I VolumeSliderController:D", target),
                         CreateNoWindow = true,
                         UseShellExecute = false,
                         RedirectStandardOutput = true
                     };
                     _logcatProc = Process.Start(psiLogcat);
+                    _lastSliderSetTime = DateTime.Now;
+                    DateTime connectStartTime = DateTime.Now;
 
                     // Companion polling task for non-key volume changes
                     Task.Run(() =>
@@ -1923,7 +1950,8 @@ namespace WiFiAudioConnector
                         {
                             Thread.Sleep(1500);
                             if (!_settings.SyncPhoneVolume) continue;
-                            if ((DateTime.Now - _lastSliderSetTime).TotalMilliseconds < 1500) continue;
+                            if ((DateTime.Now - connectStartTime).TotalMilliseconds < 3500) continue;
+                            if ((DateTime.Now - _lastSliderSetTime).TotalMilliseconds < 2000) continue;
 
                             try
                             {
@@ -1945,6 +1973,7 @@ namespace WiFiAudioConnector
                                         int cur = int.Parse(m.Groups[1].Value);
                                         int pct = (int)Math.Round((float)cur * 100 / _phoneMaxVolume);
                                         pct = Math.Max(0, Math.Min(100, pct));
+                                        if (pct == 0 && _settings.MasterVolume > 15) continue;
                                         if (Math.Abs(pct - _settings.MasterVolume) >= 2)
                                         {
                                             _settings.MasterVolume = pct;
@@ -1968,7 +1997,8 @@ namespace WiFiAudioConnector
                     while (_logcatProc != null && !_logcatProc.HasExited && (line = _logcatProc.StandardOutput.ReadLine()) != null)
                     {
                         if (!_settings.SyncPhoneVolume) continue;
-                        if ((DateTime.Now - _lastSliderSetTime).TotalMilliseconds < 800) continue;
+                        if ((DateTime.Now - connectStartTime).TotalMilliseconds < 3500) continue;
+                        if ((DateTime.Now - _lastSliderSetTime).TotalMilliseconds < 1500) continue;
 
                         if (line.Contains("STREAM_MUSIC"))
                         {
@@ -1978,6 +2008,7 @@ namespace WiFiAudioConnector
                                 int val = int.Parse(m.Groups[1].Value);
                                 int pct = (int)Math.Round((float)val * 100 / _phoneMaxVolume);
                                 pct = Math.Max(0, Math.Min(100, pct));
+                                if (pct == 0 && _settings.MasterVolume > 15) continue;
 
                                 _settings.MasterVolume = pct;
                                 if (_scrcpyProc != null && !_scrcpyProc.HasExited)
@@ -2009,6 +2040,70 @@ namespace WiFiAudioConnector
             _logcatProc = null;
         }
 
+        public void QueuePhoneVolumeSync(float ratio, bool isMuted)
+        {
+            int targetIndex = (int)Math.Round(ratio * _phoneMaxVolume);
+            lock (_phoneSyncLock)
+            {
+                _pendingPhoneIndex = targetIndex;
+                _pendingPhoneMute = isMuted;
+                _hasPendingPhoneSync = true;
+                if (_isPhoneSyncWorkerRunning) return;
+                _isPhoneSyncWorkerRunning = true;
+            }
+
+            Task.Run(() =>
+            {
+                while (true)
+                {
+                    int indexToSync;
+                    bool muteToSync;
+                    lock (_phoneSyncLock)
+                    {
+                        if (!_hasPendingPhoneSync)
+                        {
+                            _isPhoneSyncWorkerRunning = false;
+                            break;
+                        }
+                        indexToSync = _pendingPhoneIndex;
+                        muteToSync = _pendingPhoneMute;
+                        _hasPendingPhoneSync = false;
+                    }
+
+                    try
+                    {
+                        string target = _currentActiveTarget;
+                        if (string.IsNullOrEmpty(target) || !IsConnected) break;
+                        string adbPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "adb.exe");
+                        string cmdArgs;
+                        if (muteToSync)
+                        {
+                            cmdArgs = string.Format("-s {0} shell \"cmd audio set-volume 3 0; cmd audio adj-mute 3; cmd media_session volume --stream 3 --set 0\"", target);
+                        }
+                        else
+                        {
+                            cmdArgs = string.Format("-s {0} shell \"cmd audio adj-unmute 3; cmd audio set-volume 3 {1}; cmd media_session volume --stream 3 --set {1}\"", target, indexToSync);
+                        }
+                        var psi = new ProcessStartInfo
+                        {
+                            FileName = adbPath,
+                            Arguments = cmdArgs,
+                            CreateNoWindow = true,
+                            UseShellExecute = false
+                        };
+                        using (var p = Process.Start(psi))
+                        {
+                            p.WaitForExit(1000);
+                        }
+                    }
+                    catch { }
+
+                    _lastSliderSetTime = DateTime.Now;
+                    Thread.Sleep(50);
+                }
+            });
+        }
+
         public void SetVolumeFromUI(int volumePercent, bool isMuted)
         {
             _settings.MasterVolume = volumePercent;
@@ -2022,39 +2117,10 @@ namespace WiFiAudioConnector
                 WindowsAudioSessionController.SetProcessVolume(_scrcpyProc.Id, ratio, isMuted);
             }
 
-            // Sync to phone in background
+            // Sync to phone through serial throttled queue
             if (_settings.SyncPhoneVolume && IsConnected && !string.IsNullOrEmpty(_currentActiveTarget))
             {
-                string target = _currentActiveTarget;
-                int targetIndex = (int)Math.Round(ratio * _phoneMaxVolume);
-                Task.Run(() =>
-                {
-                    try
-                    {
-                        string adbPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "adb.exe");
-                        string cmdArgs;
-                        if (isMuted)
-                        {
-                            cmdArgs = string.Format("-s {0} shell \"cmd audio set-volume 3 0; cmd audio adj-mute 3; cmd media_session volume --stream 3 --set 0\"", target);
-                        }
-                        else
-                        {
-                            cmdArgs = string.Format("-s {0} shell \"cmd audio adj-unmute 3; cmd audio set-volume 3 {1}; cmd media_session volume --stream 3 --set {1}\"", target, targetIndex);
-                        }
-                        var psi = new ProcessStartInfo
-                        {
-                            FileName = adbPath,
-                            Arguments = cmdArgs,
-                            CreateNoWindow = true,
-                            UseShellExecute = false
-                        };
-                        using (var p = Process.Start(psi))
-                        {
-                            p.WaitForExit(1500);
-                        }
-                    }
-                    catch { }
-                });
+                QueuePhoneVolumeSync(ratio, isMuted);
             }
         }
 
@@ -2128,6 +2194,7 @@ namespace WiFiAudioConnector
         private CheckBox _cbSyncPhoneVolume;
         private CheckBox _cbMuteOnDisconnect;
         private bool _isUpdatingVolumeUI = false;
+        private bool _isUserDragging = false;
         private TextBox _tbIp;
         private TextBox _tbPort;
         private TextBlock _txtHotkeyDisplay;
@@ -2473,16 +2540,88 @@ namespace WiFiAudioConnector
             DockPanel.SetDock(_btnMute, Dock.Left);
             sliderRow.Children.Add(_btnMute);
 
+            string sliderXaml = @"<Style xmlns=""http://schemas.microsoft.com/winfx/2006/xaml/presentation"" xmlns:x=""http://schemas.microsoft.com/winfx/2006/xaml"" TargetType=""Slider"">
+  <Setter Property=""IsMoveToPointEnabled"" Value=""True""/>
+  <Setter Property=""Height"" Value=""26""/>
+  <Setter Property=""Background"" Value=""Transparent""/>
+  <Setter Property=""Cursor"" Value=""Hand""/>
+  <Setter Property=""Template"">
+    <Setter.Value>
+      <ControlTemplate TargetType=""Slider"">
+        <Grid VerticalAlignment=""Center"">
+          <Track x:Name=""PART_Track"">
+            <Track.DecreaseRepeatButton>
+              <RepeatButton Command=""{x:Static Slider.DecreaseLarge}"">
+                <RepeatButton.Template>
+                  <ControlTemplate TargetType=""RepeatButton"">
+                    <Border Height=""6"" CornerRadius=""3,0,0,3"" Background=""#3B82F6""/>
+                  </ControlTemplate>
+                </RepeatButton.Template>
+              </RepeatButton>
+            </Track.DecreaseRepeatButton>
+            <Track.IncreaseRepeatButton>
+              <RepeatButton Command=""{x:Static Slider.IncreaseLarge}"">
+                <RepeatButton.Template>
+                  <ControlTemplate TargetType=""RepeatButton"">
+                    <Border Height=""6"" CornerRadius=""0,3,3,0"" Background=""#2E3342""/>
+                  </ControlTemplate>
+                </RepeatButton.Template>
+              </RepeatButton>
+            </Track.IncreaseRepeatButton>
+            <Track.Thumb>
+              <Thumb Focusable=""False"">
+                <Thumb.Template>
+                  <ControlTemplate TargetType=""Thumb"">
+                    <Grid Width=""16"" Height=""16"">
+                      <Ellipse Fill=""#FFFFFF"">
+                        <Ellipse.Effect>
+                          <DropShadowEffect BlurRadius=""6"" ShadowDepth=""1"" Opacity=""0.45"" Color=""#000000""/>
+                        </Ellipse.Effect>
+                      </Ellipse>
+                      <Ellipse Width=""8"" Height=""8"" Fill=""#2563EB""/>
+                    </Grid>
+                  </ControlTemplate>
+                </Thumb.Template>
+              </Thumb>
+            </Track.Thumb>
+          </Track>
+        </Grid>
+      </ControlTemplate>
+    </Setter.Value>
+  </Setter>
+</Style>";
+
             _sliderVolume = new Slider
             {
                 Minimum = 0,
                 Maximum = 100,
                 Value = _app.CurrentSettings.MasterVolume,
-                IsSnapToTickEnabled = true,
-                TickFrequency = 1,
+                IsMoveToPointEnabled = true,
                 VerticalAlignment = VerticalAlignment.Center,
                 Cursor = System.Windows.Input.Cursors.Hand
             };
+            try
+            {
+                _sliderVolume.Style = (System.Windows.Style)System.Windows.Markup.XamlReader.Parse(sliderXaml);
+            }
+            catch { }
+
+            _sliderVolume.AddHandler(System.Windows.Controls.Primitives.Thumb.DragStartedEvent, new System.Windows.Controls.Primitives.DragStartedEventHandler((s, e) => { _isUserDragging = true; }));
+            _sliderVolume.AddHandler(System.Windows.Controls.Primitives.Thumb.DragCompletedEvent, new System.Windows.Controls.Primitives.DragCompletedEventHandler((s, e) => { _isUserDragging = false; }));
+            _sliderVolume.PreviewMouseLeftButtonDown += (s, e) =>
+            {
+                _isUserDragging = true;
+                System.Windows.Point pt = e.GetPosition(_sliderVolume);
+                double w = _sliderVolume.ActualWidth;
+                if (w > 16)
+                {
+                    double clickX = pt.X - 8;
+                    double ratio = Math.Max(0.0, Math.Min(1.0, clickX / (w - 16)));
+                    int targetVal = (int)Math.Round(ratio * 100.0);
+                    _sliderVolume.Value = targetVal;
+                }
+            };
+            _sliderVolume.PreviewMouseUp += (s, e) => { _isUserDragging = false; };
             _sliderVolume.ValueChanged += (s, e) =>
             {
                 if (_isUpdatingVolumeUI) return;
@@ -2895,6 +3034,9 @@ namespace WiFiAudioConnector
         {
             Action act = () =>
             {
+                if (_isUserDragging) return;
+                if ((DateTime.Now - _app.LastSliderSetTime).TotalMilliseconds < 1500) return;
+
                 _isUpdatingVolumeUI = true;
                 try
                 {
