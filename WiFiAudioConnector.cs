@@ -2575,17 +2575,45 @@ namespace WiFiAudioConnector
                 }
                 else if (e.Button == MouseButtons.Middle)
                 {
-                    if (IsConnected)
-                    {
-                        Disconnect();
-                    }
-                    else
-                    {
-                        ConnectAsync();
-                    }
+                    OnTrayMiddleClick();
                 }
             };
             _trayWheelController = new TrayWheelVolumeController(_notifyIcon, OnTrayWheelVolumeDelta, (key, desc) => SendMediaKey(key, desc));
+        }
+
+        private void OnTrayMiddleClick()
+        {
+            var sel = (_flyout != null) ? _flyout.GetSelectedDevice() : null;
+
+            // 1. Dual/concurrent mode optimization:
+            // When Bluetooth is connected and scrcpy is disconnected, middle click connects scrcpy
+            if (IsBluetoothConnected && !IsScrcpyConnected)
+            {
+                string scrcpyTarget = (sel != null && !sel.IsBluetooth) ? sel.Target : _settings.Target;
+                string scrcpyName = (sel != null && !sel.IsBluetooth) ? sel.Name : _settings.DeviceName;
+                if (!string.IsNullOrEmpty(scrcpyTarget) && !scrcpyTarget.StartsWith(@"\\?\BTHENUM", StringComparison.OrdinalIgnoreCase) && !scrcpyTarget.StartsWith("Bluetooth#", StringComparison.OrdinalIgnoreCase))
+                {
+                    ConnectAsync(scrcpyTarget, scrcpyName);
+                    return;
+                }
+            }
+
+            // 2. Target resolution
+            string target = (sel != null && !string.IsNullOrEmpty(sel.Target)) ? sel.Target : _settings.Target;
+            string devName = (sel != null && !string.IsNullOrEmpty(sel.Name)) ? sel.Name : _settings.DeviceName;
+
+            bool isBt = target != null && (target.StartsWith(@"\\?\BTHENUM", StringComparison.OrdinalIgnoreCase) || target.StartsWith("Bluetooth#", StringComparison.OrdinalIgnoreCase));
+
+            if (isBt)
+            {
+                if (IsBluetoothConnected) DisconnectBluetooth(true);
+                else ConnectAsync(target, devName);
+            }
+            else
+            {
+                if (IsScrcpyConnected) DisconnectScrcpy(true);
+                else ConnectAsync(target, devName);
+            }
         }
 
         private void OnTrayWheelVolumeDelta(int delta)
@@ -3315,8 +3343,8 @@ namespace WiFiAudioConnector
             }
             else
             {
-                DisconnectBluetooth(true);
-                DisconnectScrcpy(true);
+                if (IsBluetoothConnected) DisconnectBluetooth(true);
+                if (IsScrcpyConnected) DisconnectScrcpy(true);
             }
         }
 
@@ -3335,6 +3363,8 @@ namespace WiFiAudioConnector
 
         public void DisconnectScrcpy(bool showNotice = true)
         {
+            if (!IsScrcpyConnected && _scrcpyProc == null && string.IsNullOrEmpty(_currentScrcpyTarget)) return;
+
             string targetToMute = _currentScrcpyTarget;
             string devName = _currentScrcpyDeviceName ?? _settings.DeviceName;
             _currentScrcpyTarget = null;
