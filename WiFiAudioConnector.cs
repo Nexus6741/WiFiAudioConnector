@@ -4,6 +4,7 @@ using System.Diagnostics;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.RegularExpressions;
 using System.Threading;
@@ -23,6 +24,16 @@ using HorizontalAlignment = System.Windows.HorizontalAlignment;
 using MessageBox = System.Windows.MessageBox;
 using RadioButton = System.Windows.Controls.RadioButton;
 using TextBox = System.Windows.Controls.TextBox;
+using ListBox = System.Windows.Controls.ListBox;
+using Key = System.Windows.Input.Key;
+using ModifierKeys = System.Windows.Input.ModifierKeys;
+using KeyEventArgs = System.Windows.Input.KeyEventArgs;
+using MouseEventArgs = System.Windows.Forms.MouseEventArgs;
+using MouseButton = System.Windows.Input.MouseButton;
+using MouseButtonEventArgs = System.Windows.Input.MouseButtonEventArgs;
+using Keyboard = System.Windows.Input.Keyboard;
+using KeyInterop = System.Windows.Input.KeyInterop;
+using Orientation = System.Windows.Controls.Orientation;
 
 namespace WiFiAudioConnector
 {
@@ -43,15 +54,55 @@ namespace WiFiAudioConnector
         }
     }
 
+    public class DeviceHotkeyBinding
+    {
+        public string Target { get; set; }        // "192.168.31.239:5555" or "a22280af"
+        public string DeviceName { get; set; }    // "Xiaomi 15 Pro"
+        public bool IsUsb { get; set; }           // true = USB 有线, false = Wi-Fi 无线
+        public ModifierKeys Modifiers { get; set; }
+        public Key Key { get; set; }
+        public bool Enabled { get; set; }
+
+        public string DisplayName
+        {
+            get
+            {
+                return string.Format("{0} [{1}]", DeviceName, IsUsb ? "USB 有线" : "Wi-Fi 无线");
+            }
+        }
+
+        public string HotkeyString
+        {
+            get
+            {
+                if (!Enabled || Key == Key.None) return "(未设置)";
+                return HotkeyManager.FormatHotkey(Modifiers, Key);
+            }
+        }
+
+        public override string ToString()
+        {
+            string modeIcon = IsUsb ? "🔌" : "📶";
+            string modeTag = IsUsb ? "USB 有线" : "Wi-Fi 无线";
+            string hkTag = Enabled && Key != Key.None ? HotkeyManager.FormatHotkey(Modifiers, Key) : "未设置";
+            return string.Format("{0}  {1} [{2}]  ({3})   ▶   快捷键: {4}", modeIcon, DeviceName, modeTag, Target, hkTag);
+        }
+    }
+
     public class Settings
     {
-        public string DeviceName = "小米 15 Pro";
-        public string DeviceIp = "192.168.31.238";
+        public string DeviceName = "Xiaomi 15 Pro";
+        public string DeviceIp = "192.168.31.239";
         public int Port = 5555;
-        public string Target = "192.168.31.238:5555";
+        public string Target = "192.168.31.239:5555";
         public string Codec = "raw"; // "raw", "opus320", "opus128"
         public bool MutePhone = true;
         public bool AutoConnect = true;
+        public bool HotkeyEnabled = true;
+        public ModifierKeys HotkeyModifiers = ModifierKeys.Control | ModifierKeys.Alt;
+        public Key HotkeyKey = Key.W;
+
+        public Dictionary<string, DeviceHotkeyBinding> DeviceHotkeys = new Dictionary<string, DeviceHotkeyBinding>(StringComparer.OrdinalIgnoreCase);
 
         public static string GetConfigPath()
         {
@@ -71,6 +122,22 @@ namespace WiFiAudioConnector
                 sb.AppendLine("Codec=" + Codec);
                 sb.AppendLine("MutePhone=" + (MutePhone ? "1" : "0"));
                 sb.AppendLine("AutoConnect=" + (AutoConnect ? "1" : "0"));
+                sb.AppendLine("HotkeyEnabled=" + (HotkeyEnabled ? "1" : "0"));
+                sb.AppendLine("HotkeyModifiers=" + (int)HotkeyModifiers);
+                sb.AppendLine("HotkeyKey=" + (int)HotkeyKey);
+
+                foreach (var kvp in DeviceHotkeys)
+                {
+                    var b = kvp.Value;
+                    sb.AppendLine(string.Format("DeviceHotkey={0}|{1}|{2}|{3}|{4}|{5}",
+                        b.Target,
+                        (b.DeviceName ?? "").Replace("|", "_"),
+                        b.IsUsb ? "1" : "0",
+                        (int)b.Modifiers,
+                        (int)b.Key,
+                        b.Enabled ? "1" : "0"));
+                }
+
                 File.WriteAllText(GetConfigPath(), sb.ToString(), Encoding.UTF8);
             }
             catch { }
@@ -99,12 +166,745 @@ namespace WiFiAudioConnector
                             else if (k == "Codec") s.Codec = v;
                             else if (k == "MutePhone") s.MutePhone = (v == "1");
                             else if (k == "AutoConnect") s.AutoConnect = (v == "1");
+                            else if (k == "HotkeyEnabled") s.HotkeyEnabled = (v == "1");
+                            else if (k == "HotkeyModifiers") { int m; if (int.TryParse(v, out m)) s.HotkeyModifiers = (ModifierKeys)m; }
+                            else if (k == "HotkeyKey") { int kCode; if (int.TryParse(v, out kCode)) s.HotkeyKey = (Key)kCode; }
+                            else if (k == "DeviceHotkey")
+                            {
+                                var segs = v.Split('|');
+                                if (segs.Length >= 6)
+                                {
+                                    var b = new DeviceHotkeyBinding();
+                                    b.Target = segs[0].Trim();
+                                    b.DeviceName = segs[1].Trim();
+                                    b.IsUsb = (segs[2].Trim() == "1");
+                                    int m; if (int.TryParse(segs[3].Trim(), out m)) b.Modifiers = (ModifierKeys)m;
+                                    int kCode; if (int.TryParse(segs[4].Trim(), out kCode)) b.Key = (Key)kCode;
+                                    b.Enabled = (segs[5].Trim() == "1");
+                                    s.DeviceHotkeys[b.Target] = b;
+                                }
+                            }
                         }
                     }
                 }
             }
             catch { }
+
+            if (s.DeviceHotkeys.Count == 0)
+            {
+                s.SeedDefaultHotkeys();
+            }
+
             return s;
+        }
+
+        public void SeedDefaultHotkeys()
+        {
+            string wifiTarget = string.IsNullOrEmpty(DeviceIp) ? "192.168.31.239:5555" : string.Format("{0}:{1}", DeviceIp, Port);
+            DeviceHotkeys[wifiTarget] = new DeviceHotkeyBinding
+            {
+                Target = wifiTarget,
+                DeviceName = DeviceName,
+                IsUsb = false,
+                Modifiers = ModifierKeys.Control | ModifierKeys.Shift,
+                Key = Key.W,
+                Enabled = true
+            };
+
+            DeviceHotkeys["a22280af"] = new DeviceHotkeyBinding
+            {
+                Target = "a22280af",
+                DeviceName = DeviceName,
+                IsUsb = true,
+                Modifiers = ModifierKeys.Control | ModifierKeys.Shift,
+                Key = Key.U,
+                Enabled = true
+            };
+        }
+    }
+
+    public class HotkeyManager : IDisposable
+    {
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+
+        private const int WM_HOTKEY = 0x0312;
+        private const int BASE_HOTKEY_ID = 9000;
+
+        private class MessageWindow : NativeWindow, IDisposable
+        {
+            private readonly Action<int> _callback;
+            public MessageWindow(Action<int> callback)
+            {
+                _callback = callback;
+                CreateHandle(new CreateParams());
+            }
+
+            protected override void WndProc(ref Message m)
+            {
+                if (m.Msg == WM_HOTKEY)
+                {
+                    int id = m.WParam.ToInt32();
+                    if (_callback != null)
+                    {
+                        _callback(id);
+                    }
+                }
+                base.WndProc(ref m);
+            }
+
+            public void Dispose()
+            {
+                DestroyHandle();
+            }
+        }
+
+        private MessageWindow _msgWin;
+        private Dictionary<int, string> _idToTarget = new Dictionary<int, string>();
+        private Dictionary<string, int> _targetToId = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        private int _nextId = BASE_HOTKEY_ID;
+
+        public event Action<string> HotkeyPressed;
+
+        public HotkeyManager()
+        {
+            _msgWin = new MessageWindow(new Action<int>(OnMessageReceived));
+        }
+
+        private void OnMessageReceived(int id)
+        {
+            string target;
+            if (_idToTarget.TryGetValue(id, out target))
+            {
+                if (HotkeyPressed != null)
+                {
+                    HotkeyPressed(target);
+                }
+            }
+        }
+
+        public bool Register(string target, ModifierKeys modifiers, Key key)
+        {
+            Unregister(target);
+
+            if (key == Key.None || string.IsNullOrEmpty(target)) return false;
+
+            uint fsMod = 0x4000; // MOD_NOREPEAT
+            if ((modifiers & ModifierKeys.Alt) != 0) fsMod |= 0x0001;
+            if ((modifiers & ModifierKeys.Control) != 0) fsMod |= 0x0002;
+            if ((modifiers & ModifierKeys.Shift) != 0) fsMod |= 0x0004;
+            if ((modifiers & ModifierKeys.Windows) != 0) fsMod |= 0x0008;
+
+            uint vk = (uint)KeyInterop.VirtualKeyFromKey(key);
+            int newId = ++_nextId;
+            bool success = RegisterHotKey(_msgWin.Handle, newId, fsMod, vk);
+            if (success)
+            {
+                _idToTarget[newId] = target;
+                _targetToId[target] = newId;
+            }
+            return success;
+        }
+
+        public void Unregister(string target)
+        {
+            int id;
+            if (_targetToId.TryGetValue(target, out id))
+            {
+                if (_msgWin != null && _msgWin.Handle != IntPtr.Zero)
+                {
+                    UnregisterHotKey(_msgWin.Handle, id);
+                }
+                _idToTarget.Remove(id);
+                _targetToId.Remove(target);
+            }
+        }
+
+        public void UnregisterAll()
+        {
+            if (_msgWin != null && _msgWin.Handle != IntPtr.Zero)
+            {
+                foreach (int id in _idToTarget.Keys)
+                {
+                    UnregisterHotKey(_msgWin.Handle, id);
+                }
+            }
+            _idToTarget.Clear();
+            _targetToId.Clear();
+        }
+
+        public void Dispose()
+        {
+            UnregisterAll();
+            if (_msgWin != null)
+            {
+                _msgWin.Dispose();
+                _msgWin = null;
+            }
+        }
+
+        public static string FormatHotkey(ModifierKeys modifiers, Key key)
+        {
+            if (key == Key.None) return "未设置";
+            List<string> parts = new List<string>();
+            if ((modifiers & ModifierKeys.Control) != 0) parts.Add("Ctrl");
+            if ((modifiers & ModifierKeys.Alt) != 0) parts.Add("Alt");
+            if ((modifiers & ModifierKeys.Shift) != 0) parts.Add("Shift");
+            if ((modifiers & ModifierKeys.Windows) != 0) parts.Add("Win");
+            parts.Add(KeyToString(key));
+            return string.Join(" + ", parts.ToArray());
+        }
+
+        public static string KeyToString(Key key)
+        {
+            if (key >= Key.D0 && key <= Key.D9)
+                return ((char)('0' + (key - Key.D0))).ToString();
+            if (key >= Key.NumPad0 && key <= Key.NumPad9)
+                return "Num" + ((int)(key - Key.NumPad0)).ToString();
+            return key.ToString();
+        }
+    }
+
+    public class HotkeyConfigWindow : Window
+    {
+        private App _app;
+        private List<DeviceHotkeyBinding> _bindingsList = new List<DeviceHotkeyBinding>();
+        private ListBox _lbDevices;
+        private DeviceHotkeyBinding _selectedBinding = null;
+
+        private TextBlock _tbSelectedTitle;
+        private TextBlock _tbHotkeyDisplay;
+        private Border _hotkeyBorder;
+        private CheckBox _cbEnable;
+        private TextBlock _tbStatus;
+        private bool _isRecording = false;
+        private ModifierKeys _tempMod;
+        private Key _tempKey;
+
+        public HotkeyConfigWindow(App app)
+        {
+            _app = app;
+            LoadBindings();
+            BuildUI();
+        }
+
+        private void LoadBindings()
+        {
+            _bindingsList.Clear();
+            foreach (var b in _app.CurrentSettings.DeviceHotkeys.Values)
+            {
+                _bindingsList.Add(new DeviceHotkeyBinding
+                {
+                    Target = b.Target,
+                    DeviceName = b.DeviceName,
+                    IsUsb = b.IsUsb,
+                    Modifiers = b.Modifiers,
+                    Key = b.Key,
+                    Enabled = b.Enabled
+                });
+            }
+        }
+
+        private void BuildUI()
+        {
+            Width = 560;
+            Height = 580;
+            WindowStyle = WindowStyle.None;
+            AllowsTransparency = true;
+            Background = System.Windows.Media.Brushes.Transparent;
+            WindowStartupLocation = WindowStartupLocation.CenterScreen;
+            Topmost = true;
+            ShowInTaskbar = false;
+
+            MouseDown += (s, e) =>
+            {
+                if (e.ChangedButton == MouseButton.Left && !_isRecording)
+                {
+                    DragMove();
+                }
+            };
+
+            var mainBorder = new Border
+            {
+                Background = new SolidColorBrush(Color.FromArgb(248, 30, 32, 38)),
+                BorderBrush = new SolidColorBrush(Color.FromArgb(90, 255, 255, 255)),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(12),
+                Padding = new Thickness(18),
+                Effect = new DropShadowEffect
+                {
+                    BlurRadius = 24,
+                    ShadowDepth = 6,
+                    Opacity = 0.5,
+                    Color = Colors.Black
+                }
+            };
+
+            var root = new StackPanel();
+
+            // Header Row
+            var header = new DockPanel { Margin = new Thickness(0, 0, 0, 10) };
+            var closeBtn = new Button
+            {
+                Content = "×",
+                FontSize = 18,
+                Foreground = new SolidColorBrush(Color.FromArgb(180, 255, 255, 255)),
+                Background = System.Windows.Media.Brushes.Transparent,
+                BorderThickness = new Thickness(0),
+                Cursor = System.Windows.Input.Cursors.Hand,
+                HorizontalAlignment = HorizontalAlignment.Right
+            };
+            closeBtn.Click += (s, e) => Close();
+            DockPanel.SetDock(closeBtn, Dock.Right);
+
+            var title = new TextBlock
+            {
+                Text = "⌨ 设备专属快捷键设置",
+                FontFamily = new FontFamily("Microsoft YaHei UI, Segoe UI"),
+                FontSize = 16,
+                FontWeight = FontWeights.Bold,
+                Foreground = System.Windows.Media.Brushes.White,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            header.Children.Add(closeBtn);
+            header.Children.Add(title);
+            root.Children.Add(header);
+
+            // Subtitle
+            var desc = new TextBlock
+            {
+                Text = "支持为每台设备以及同一设备的「无线 Wi-Fi」与「有线 USB」分别绑定快捷键。\n无论正在运行什么全屏程序或游戏，按下专属快捷键即可一键直连或切断。",
+                FontSize = 11,
+                Foreground = new SolidColorBrush(Color.FromArgb(170, 185, 195, 210)),
+                LineHeight = 16,
+                Margin = new Thickness(0, 0, 0, 10)
+            };
+            root.Children.Add(desc);
+
+            // Device List Card
+            var listCard = new Border
+            {
+                Background = new SolidColorBrush(Color.FromArgb(160, 42, 45, 54)),
+                CornerRadius = new CornerRadius(8),
+                Padding = new Thickness(12),
+                Margin = new Thickness(0, 0, 0, 10)
+            };
+            var listCardPanel = new StackPanel();
+
+            var listHeader = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
+            var btnScan = new Button
+            {
+                Content = "🔄 扫描在线设备",
+                FontSize = 10,
+                Padding = new Thickness(6, 2, 6, 2),
+                Background = new SolidColorBrush(Color.FromArgb(180, 50, 55, 68)),
+                Foreground = System.Windows.Media.Brushes.White,
+                BorderBrush = new SolidColorBrush(Color.FromArgb(80, 255, 255, 255)),
+                Cursor = System.Windows.Input.Cursors.Hand,
+                HorizontalAlignment = HorizontalAlignment.Right
+            };
+            btnScan.Click += (s, e) => ScanAndAddDevices();
+            DockPanel.SetDock(btnScan, Dock.Right);
+
+            var listTitle = new TextBlock
+            {
+                Text = "设备与连接模式列表 (单击选择要配置的项目):",
+                FontSize = 11,
+                FontWeight = FontWeights.SemiBold,
+                Foreground = System.Windows.Media.Brushes.White,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            listHeader.Children.Add(btnScan);
+            listHeader.Children.Add(listTitle);
+            listCardPanel.Children.Add(listHeader);
+
+            _lbDevices = new ListBox
+            {
+                Height = 115,
+                Background = new SolidColorBrush(Color.FromArgb(220, 20, 22, 28)),
+                BorderBrush = new SolidColorBrush(Color.FromArgb(100, 255, 255, 255)),
+                Foreground = System.Windows.Media.Brushes.White,
+                FontSize = 11,
+                FontFamily = new FontFamily("Microsoft YaHei UI, Consolas, Segoe UI"),
+                Padding = new Thickness(4),
+                ItemsSource = _bindingsList
+            };
+            _lbDevices.SelectionChanged += (s, e) => OnDeviceSelected();
+            listCardPanel.Children.Add(_lbDevices);
+            listCard.Child = listCardPanel;
+            root.Children.Add(listCard);
+
+            // Editor Card for selected item
+            var editCard = new Border
+            {
+                Background = new SolidColorBrush(Color.FromArgb(160, 42, 45, 54)),
+                CornerRadius = new CornerRadius(8),
+                Padding = new Thickness(12),
+                Margin = new Thickness(0, 0, 0, 10)
+            };
+            var editCardPanel = new StackPanel();
+
+            _tbSelectedTitle = new TextBlock
+            {
+                Text = "当前未选中项目，请在上表中点击选择",
+                FontSize = 12,
+                FontWeight = FontWeights.Bold,
+                Foreground = new SolidColorBrush(Color.FromArgb(255, 80, 190, 255)),
+                Margin = new Thickness(0, 0, 0, 8)
+            };
+            editCardPanel.Children.Add(_tbSelectedTitle);
+
+            var boxLabel = new TextBlock
+            {
+                Text = "专属快捷键 (点击方框直接在键盘上按下新按键):",
+                FontSize = 11,
+                Foreground = new SolidColorBrush(Color.FromArgb(200, 255, 255, 255)),
+                Margin = new Thickness(0, 0, 0, 6)
+            };
+            editCardPanel.Children.Add(boxLabel);
+
+            _hotkeyBorder = new Border
+            {
+                Background = new SolidColorBrush(Color.FromArgb(220, 20, 22, 28)),
+                BorderBrush = new SolidColorBrush(Color.FromArgb(100, 255, 255, 255)),
+                BorderThickness = new Thickness(1.5),
+                CornerRadius = new CornerRadius(6),
+                Height = 36,
+                Cursor = System.Windows.Input.Cursors.Hand,
+                Focusable = true,
+                Margin = new Thickness(0, 0, 0, 8)
+            };
+
+            _tbHotkeyDisplay = new TextBlock
+            {
+                Text = "请先选择设备",
+                FontSize = 13,
+                FontWeight = FontWeights.Bold,
+                Foreground = new SolidColorBrush(Color.FromArgb(255, 100, 200, 255)),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            _hotkeyBorder.Child = _tbHotkeyDisplay;
+
+            _hotkeyBorder.MouseDown += (s, e) =>
+            {
+                if (_selectedBinding == null) return;
+                _isRecording = true;
+                _hotkeyBorder.Focus();
+                _hotkeyBorder.BorderBrush = new SolidColorBrush(Color.FromArgb(255, 20, 120, 240));
+                _tbHotkeyDisplay.Text = "▶ 请直接在键盘上按下快捷键...";
+                _tbHotkeyDisplay.Foreground = new SolidColorBrush(Color.FromArgb(255, 245, 180, 50));
+            };
+
+            _hotkeyBorder.LostFocus += (s, e) =>
+            {
+                if (_isRecording)
+                {
+                    _isRecording = false;
+                    UpdateDisplay();
+                }
+            };
+
+            _hotkeyBorder.PreviewKeyDown += OnBorderPreviewKeyDown;
+            editCardPanel.Children.Add(_hotkeyBorder);
+
+            // Presets
+            var presetRow = new StackPanel { Orientation = Orientation.Horizontal, Margin = new Thickness(0, 0, 0, 8) };
+            presetRow.Children.Add(new TextBlock
+            {
+                Text = "常用预设: ",
+                FontSize = 11,
+                Foreground = new SolidColorBrush(Color.FromArgb(160, 200, 205, 215)),
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 6, 0)
+            });
+
+            Action<string, ModifierKeys, Key> addPreset = (name, m, k) =>
+            {
+                var btn = new Button
+                {
+                    Content = name,
+                    FontSize = 10,
+                    Padding = new Thickness(5, 2, 5, 2),
+                    Margin = new Thickness(0, 0, 5, 0),
+                    Background = new SolidColorBrush(Color.FromArgb(160, 50, 55, 68)),
+                    Foreground = System.Windows.Media.Brushes.White,
+                    BorderBrush = new SolidColorBrush(Color.FromArgb(70, 255, 255, 255)),
+                    Cursor = System.Windows.Input.Cursors.Hand
+                };
+                btn.Click += (s, e) =>
+                {
+                    if (_selectedBinding == null) return;
+                    _isRecording = false;
+                    _tempMod = m;
+                    _tempKey = k;
+                    UpdateDisplay();
+                };
+                presetRow.Children.Add(btn);
+            };
+
+            addPreset("Ctrl+Shift+W (无线常用)", ModifierKeys.Control | ModifierKeys.Shift, Key.W);
+            addPreset("Ctrl+Shift+U (有线常用)", ModifierKeys.Control | ModifierKeys.Shift, Key.U);
+            addPreset("Ctrl+Alt+1", ModifierKeys.Control | ModifierKeys.Alt, Key.D1);
+            addPreset("Ctrl+Alt+2", ModifierKeys.Control | ModifierKeys.Alt, Key.D2);
+            addPreset("Ctrl+Alt+U", ModifierKeys.Control | ModifierKeys.Alt, Key.U);
+            addPreset("F9", ModifierKeys.None, Key.F9);
+
+            editCardPanel.Children.Add(presetRow);
+
+            // Enable check + Apply buttons row
+            var actRow = new DockPanel();
+            _cbEnable = new CheckBox
+            {
+                Content = "启用此设备的专属快捷键",
+                Foreground = System.Windows.Media.Brushes.White,
+                FontSize = 11,
+                IsChecked = true,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+
+            var btnApplyToItem = new Button
+            {
+                Content = "✔ 确认设定",
+                Width = 84,
+                Height = 26,
+                FontSize = 11,
+                FontWeight = FontWeights.Bold,
+                Background = new SolidColorBrush(Color.FromArgb(200, 30, 140, 90)),
+                Foreground = System.Windows.Media.Brushes.White,
+                BorderThickness = new Thickness(0),
+                Cursor = System.Windows.Input.Cursors.Hand,
+                HorizontalAlignment = HorizontalAlignment.Right
+            };
+            btnApplyToItem.Click += (s, e) => ApplyToSelectedItem();
+            DockPanel.SetDock(btnApplyToItem, Dock.Right);
+
+            var btnClearItem = new Button
+            {
+                Content = "清除按键",
+                Width = 68,
+                Height = 26,
+                FontSize = 11,
+                Background = new SolidColorBrush(Color.FromArgb(140, 70, 75, 88)),
+                Foreground = System.Windows.Media.Brushes.White,
+                BorderThickness = new Thickness(0),
+                Cursor = System.Windows.Input.Cursors.Hand,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                Margin = new Thickness(0, 0, 6, 0)
+            };
+            btnClearItem.Click += (s, e) =>
+            {
+                if (_selectedBinding == null) return;
+                _tempMod = ModifierKeys.None;
+                _tempKey = Key.None;
+                UpdateDisplay();
+                ApplyToSelectedItem();
+            };
+            DockPanel.SetDock(btnClearItem, Dock.Right);
+
+            actRow.Children.Add(btnApplyToItem);
+            actRow.Children.Add(btnClearItem);
+            actRow.Children.Add(_cbEnable);
+            editCardPanel.Children.Add(actRow);
+
+            editCard.Child = editCardPanel;
+            root.Children.Add(editCard);
+
+            // Status Text
+            _tbStatus = new TextBlock
+            {
+                Text = "",
+                FontSize = 11,
+                Foreground = new SolidColorBrush(Color.FromArgb(255, 80, 200, 120)),
+                HorizontalAlignment = HorizontalAlignment.Center,
+                Margin = new Thickness(0, 0, 0, 8)
+            };
+            root.Children.Add(_tbStatus);
+
+            // Bottom action buttons
+            var bottomRow = new DockPanel();
+            var btnSaveAll = new Button
+            {
+                Content = "💾 保存全部配置并生效",
+                Width = 160,
+                Height = 32,
+                FontSize = 12,
+                FontWeight = FontWeights.Bold,
+                Background = new SolidColorBrush(Color.FromArgb(255, 20, 120, 240)),
+                Foreground = System.Windows.Media.Brushes.White,
+                BorderThickness = new Thickness(0),
+                Cursor = System.Windows.Input.Cursors.Hand,
+                HorizontalAlignment = HorizontalAlignment.Right
+            };
+            btnSaveAll.Click += (s, e) => OnSaveAllClicked();
+            DockPanel.SetDock(btnSaveAll, Dock.Right);
+
+            var btnCancel = new Button
+            {
+                Content = "取消",
+                Width = 64,
+                Height = 32,
+                FontSize = 11,
+                Background = new SolidColorBrush(Color.FromArgb(160, 50, 55, 68)),
+                Foreground = System.Windows.Media.Brushes.White,
+                BorderThickness = new Thickness(0),
+                Cursor = System.Windows.Input.Cursors.Hand,
+                HorizontalAlignment = HorizontalAlignment.Right,
+                Margin = new Thickness(0, 0, 8, 0)
+            };
+            btnCancel.Click += (s, e) => Close();
+            DockPanel.SetDock(btnCancel, Dock.Right);
+
+            bottomRow.Children.Add(btnSaveAll);
+            bottomRow.Children.Add(btnCancel);
+            root.Children.Add(bottomRow);
+
+            mainBorder.Child = root;
+            Content = mainBorder;
+
+            if (_lbDevices.Items.Count > 0)
+            {
+                _lbDevices.SelectedIndex = 0;
+            }
+        }
+
+        private async void ScanAndAddDevices()
+        {
+            _tbStatus.Text = "正在扫描局域网与USB设备...";
+            _tbStatus.Foreground = new SolidColorBrush(Color.FromArgb(255, 245, 180, 50));
+
+            var scanned = await _app.ScanDevicesAsync();
+            int addedCount = 0;
+            foreach (var d in scanned)
+            {
+                if (string.IsNullOrEmpty(d.Target)) continue;
+                bool exists = false;
+                foreach (var b in _bindingsList)
+                {
+                    if (string.Equals(b.Target, d.Target, StringComparison.OrdinalIgnoreCase))
+                    {
+                        exists = true;
+                        break;
+                    }
+                }
+                if (!exists)
+                {
+                    var newBinding = new DeviceHotkeyBinding
+                    {
+                        Target = d.Target,
+                        DeviceName = d.Name,
+                        IsUsb = d.IsUsb,
+                        Modifiers = ModifierKeys.Control | ModifierKeys.Alt,
+                        Key = d.IsUsb ? Key.U : Key.W,
+                        Enabled = true
+                    };
+                    _bindingsList.Add(newBinding);
+                    addedCount++;
+                }
+            }
+
+            _lbDevices.ItemsSource = null;
+            _lbDevices.ItemsSource = _bindingsList;
+            if (_lbDevices.Items.Count > 0) _lbDevices.SelectedIndex = _lbDevices.Items.Count - 1;
+
+            _tbStatus.Text = addedCount > 0 ? string.Format("✓ 扫描完成，新增了 {0} 个连接方式！", addedCount) : "✓ 扫描完成，已连接设备均在列表中。";
+            _tbStatus.Foreground = new SolidColorBrush(Color.FromArgb(255, 80, 200, 120));
+        }
+
+        private void OnDeviceSelected()
+        {
+            _selectedBinding = _lbDevices.SelectedItem as DeviceHotkeyBinding;
+            if (_selectedBinding == null)
+            {
+                _tbSelectedTitle.Text = "当前未选中项目，请在上表中点击选择";
+                _tbHotkeyDisplay.Text = "请先选择设备";
+                return;
+            }
+
+            string modeTag = _selectedBinding.IsUsb ? "USB 有线直连" : "Wi-Fi 无线网络";
+            _tbSelectedTitle.Text = string.Format("正在设置: {0} [{1}] ({2})", _selectedBinding.DeviceName, modeTag, _selectedBinding.Target);
+            _tempMod = _selectedBinding.Modifiers;
+            _tempKey = _selectedBinding.Key;
+            _cbEnable.IsChecked = _selectedBinding.Enabled;
+            UpdateDisplay();
+        }
+
+        private void OnBorderPreviewKeyDown(object sender, KeyEventArgs e)
+        {
+            if (!_isRecording || _selectedBinding == null) return;
+
+            e.Handled = true;
+            Key key = e.Key;
+            if (key == Key.System) key = e.SystemKey;
+
+            if (key == Key.LeftCtrl || key == Key.RightCtrl ||
+                key == Key.LeftAlt || key == Key.RightAlt ||
+                key == Key.LeftShift || key == Key.RightShift ||
+                key == Key.LWin || key == Key.RWin)
+            {
+                return;
+            }
+
+            if (key == Key.Escape)
+            {
+                _isRecording = false;
+                UpdateDisplay();
+                return;
+            }
+
+            _tempMod = Keyboard.Modifiers;
+            _tempKey = key;
+            _isRecording = false;
+            UpdateDisplay();
+        }
+
+        private void UpdateDisplay()
+        {
+            _hotkeyBorder.BorderBrush = new SolidColorBrush(Color.FromArgb(100, 255, 255, 255));
+            _tbHotkeyDisplay.Text = HotkeyManager.FormatHotkey(_tempMod, _tempKey);
+            _tbHotkeyDisplay.Foreground = new SolidColorBrush(Color.FromArgb(255, 100, 200, 255));
+            _tbStatus.Text = "";
+        }
+
+        private void ApplyToSelectedItem()
+        {
+            if (_selectedBinding == null) return;
+
+            _selectedBinding.Modifiers = _tempMod;
+            _selectedBinding.Key = _tempKey;
+            _selectedBinding.Enabled = (_cbEnable.IsChecked == true);
+
+            _lbDevices.Items.Refresh();
+
+            _tbStatus.Text = string.Format("✓ 已更新 {0} 的快捷键为 [{1}]！点击底部「保存全部配置」生效",
+                _selectedBinding.DisplayName, HotkeyManager.FormatHotkey(_tempMod, _tempKey));
+            _tbStatus.Foreground = new SolidColorBrush(Color.FromArgb(255, 80, 200, 120));
+        }
+
+        private void OnSaveAllClicked()
+        {
+            if (_selectedBinding != null)
+            {
+                _selectedBinding.Modifiers = _tempMod;
+                _selectedBinding.Key = _tempKey;
+                _selectedBinding.Enabled = (_cbEnable.IsChecked == true);
+            }
+
+            _app.CurrentSettings.DeviceHotkeys.Clear();
+            foreach (var b in _bindingsList)
+            {
+                _app.CurrentSettings.DeviceHotkeys[b.Target] = b;
+            }
+            _app.CurrentSettings.Save();
+
+            _app.ApplyAllHotkeys();
+            _app.RefreshFlyoutHotkey();
+
+            _app.ShowNotification("设备快捷键已保存", "所有设备的专属全局快捷键已生效！");
+            Close();
         }
     }
 
@@ -116,6 +916,8 @@ namespace WiFiAudioConnector
         private Settings _settings;
         private Process _scrcpyProc = null;
         private bool _isConnecting = false;
+        private HotkeyManager _hotkeyManager = null;
+        private HotkeyConfigWindow _hotkeyWin = null;
 
         public static void LogLine(string s)
         {
@@ -168,6 +970,7 @@ namespace WiFiAudioConnector
             {
                 _settings = Settings.Load();
                 InitTrayIcon();
+                InitHotkey();
                 _flyout = new FlyoutWindow(this);
                 MainWindow = _flyout;
 
@@ -197,6 +1000,7 @@ namespace WiFiAudioConnector
                 ShowFlyout();
                 _flyout.TriggerScan();
             });
+            menu.Items.Add("快捷键设置...", null, (s, e) => ShowHotkeyConfigWindow());
             menu.Items.Add(new ToolStripSeparator());
 
             var autoStartItem = new ToolStripMenuItem("开机自动连接");
@@ -495,7 +1299,10 @@ namespace WiFiAudioConnector
             return detectedIp;
         }
 
-        public async void ConnectAsync()
+        public string CurrentActiveTarget { get { return _currentActiveTarget; } }
+        private string _currentActiveTarget = null;
+
+        public async void ConnectAsync(string specificTarget = null)
         {
             if (IsConnected || _isConnecting) return;
             _isConnecting = true;
@@ -513,8 +1320,8 @@ namespace WiFiAudioConnector
                 return;
             }
 
-            string target = _settings.Target;
-            if (string.IsNullOrEmpty(target) || target.Contains("."))
+            string target = !string.IsNullOrEmpty(specificTarget) ? specificTarget : _settings.Target;
+            if (string.IsNullOrEmpty(target) || (target.Contains(".") && !target.Contains(":")))
             {
                 target = string.Format("{0}:{1}", _settings.DeviceIp, _settings.Port);
                 _settings.Target = target;
@@ -590,10 +1397,12 @@ namespace WiFiAudioConnector
 
             if (ok)
             {
+                _currentActiveTarget = target;
                 UpdateTrayIcon(true);
                 string desc = _settings.Codec == "raw" ? "Raw PCM 无损" : "Opus 320K";
-                _notifyIcon.Text = string.Format("WiFi 音频连接器 - {0} (已连接)", _settings.DeviceName);
-                _notifyIcon.ShowBalloonTip(2500, "设备已连接", string.Format("{0} ({1})\n音频流已就绪，直通电脑播放", _settings.DeviceName, desc), ToolTipIcon.Info);
+                string modeTag = isTcp ? "Wi-Fi 无线" : "USB 有线";
+                _notifyIcon.Text = string.Format("WiFi 音频连接器 - {0} [{1}] (已连接)", _settings.DeviceName, modeTag);
+                _notifyIcon.ShowBalloonTip(2000, "设备已连接", string.Format("{0} [{1}]\n音频流已就绪 ({2})，直通电脑播放", _settings.DeviceName, modeTag, desc), ToolTipIcon.Info);
                 _flyout.UpdateState(ConnectionState.Connected);
 
                 // Watchdog task
@@ -605,6 +1414,7 @@ namespace WiFiAudioConnector
                     }
                     catch { }
 
+                    _currentActiveTarget = null;
                     Dispatcher.BeginInvoke(new Action(() =>
                     {
                         UpdateTrayIcon(false);
@@ -615,10 +1425,11 @@ namespace WiFiAudioConnector
             }
             else
             {
+                _currentActiveTarget = null;
                 UpdateTrayIcon(false);
                 _notifyIcon.Text = "WiFi 音频连接器 (未连接)";
                 _flyout.UpdateState(ConnectionState.Disconnected);
-                _notifyIcon.ShowBalloonTip(2500, "连接失败", "无法连接到手机，请确认手机已开机并处于同一局域网 Wi-Fi", ToolTipIcon.Error);
+                _notifyIcon.ShowBalloonTip(2500, "连接失败", "无法连接到设备，请确认手机已开机且处于连接状态", ToolTipIcon.Error);
             }
         }
 
@@ -633,6 +1444,7 @@ namespace WiFiAudioConnector
             }
             catch { }
             _scrcpyProc = null;
+            _currentActiveTarget = null;
             UpdateTrayIcon(false);
             _notifyIcon.Text = "WiFi 音频连接器 (未连接)";
             _flyout.UpdateState(ConnectionState.Disconnected);
@@ -685,9 +1497,119 @@ namespace WiFiAudioConnector
             catch { }
         }
 
+        private void InitHotkey()
+        {
+            try
+            {
+                _hotkeyManager = new HotkeyManager();
+                _hotkeyManager.HotkeyPressed += OnDeviceHotkeyPressed;
+                ApplyAllHotkeys();
+            }
+            catch (Exception ex)
+            {
+                LogLine("InitHotkey Exception: " + ex);
+            }
+        }
+
+        public void ApplyAllHotkeys()
+        {
+            if (_hotkeyManager == null) return;
+            _hotkeyManager.UnregisterAll();
+
+            foreach (var b in _settings.DeviceHotkeys.Values)
+            {
+                if (b.Enabled && b.Key != Key.None && !string.IsNullOrEmpty(b.Target))
+                {
+                    bool ok = _hotkeyManager.Register(b.Target, b.Modifiers, b.Key);
+                    LogLine(string.Format("Registered hotkey for {0} ({1}): {2} -> {3}",
+                        b.DisplayName, b.Target, HotkeyManager.FormatHotkey(b.Modifiers, b.Key), ok));
+                }
+            }
+        }
+
+        private void OnDeviceHotkeyPressed(string target)
+        {
+            if (_isConnecting) return;
+
+            DeviceHotkeyBinding binding = null;
+            _settings.DeviceHotkeys.TryGetValue(target, out binding);
+            string devName = (binding != null) ? binding.DisplayName : target;
+
+            // If currently connected to THIS exact target -> Toggle Disconnect!
+            if (IsConnected && string.Equals(_currentActiveTarget, target, StringComparison.OrdinalIgnoreCase))
+            {
+                Disconnect();
+                _notifyIcon.ShowBalloonTip(1500, "快捷键已触发", string.Format("已断开: {0}", devName), ToolTipIcon.Info);
+            }
+            else
+            {
+                // If currently connected to another target/mode -> Disconnect first then switch!
+                if (IsConnected)
+                {
+                    Disconnect();
+                    Thread.Sleep(300);
+                }
+
+                _settings.Target = target;
+                if (binding != null)
+                {
+                    _settings.DeviceName = binding.DeviceName;
+                    if (!binding.IsUsb && target.Contains(":"))
+                    {
+                        var sp = target.Split(':');
+                        _settings.DeviceIp = sp[0];
+                        if (sp.Length > 1) int.TryParse(sp[1], out _settings.Port);
+                    }
+                }
+                _settings.Save();
+
+                if (_flyout != null)
+                {
+                    _flyout.SyncCurrentDeviceToUI();
+                }
+
+                _notifyIcon.ShowBalloonTip(1500, "快捷键已触发", string.Format("正在快速直连: {0}...", devName), ToolTipIcon.Info);
+                ConnectAsync(target);
+            }
+        }
+
+        public void ShowHotkeyConfigWindow()
+        {
+            if (_hotkeyWin != null && _hotkeyWin.IsLoaded)
+            {
+                _hotkeyWin.Activate();
+                return;
+            }
+            _hotkeyWin = new HotkeyConfigWindow(this);
+            _hotkeyWin.Closed += (s, e) => { _hotkeyWin = null; };
+            _hotkeyWin.Show();
+            _hotkeyWin.Activate();
+        }
+
+        public void RefreshFlyoutHotkey()
+        {
+            if (_flyout != null)
+            {
+                _flyout.UpdateHotkeyText();
+            }
+        }
+
+        public void ShowNotification(string title, string msg)
+        {
+            if (_notifyIcon != null)
+            {
+                _notifyIcon.ShowBalloonTip(2000, title, msg, ToolTipIcon.Info);
+            }
+        }
+
         public void ExitApp()
         {
             Disconnect();
+            if (_hotkeyManager != null)
+            {
+                _hotkeyManager.Dispose();
+                _hotkeyManager = null;
+            }
             if (_notifyIcon != null)
             {
                 _notifyIcon.Visible = false;
@@ -720,6 +1642,7 @@ namespace WiFiAudioConnector
         private CheckBox _cbAutoConnect;
         private TextBox _tbIp;
         private TextBox _tbPort;
+        private TextBlock _txtHotkeyDisplay;
         private List<DeviceItem> _deviceList = new List<DeviceItem>();
 
         public FlyoutWindow(App app)
@@ -738,7 +1661,7 @@ namespace WiFiAudioConnector
         private void BuildUI()
         {
             Width = 370;
-            Height = 525;
+            Height = 555;
             WindowStyle = WindowStyle.None;
             AllowsTransparency = true;
             Background = System.Windows.Media.Brushes.Transparent;
@@ -1089,6 +2012,34 @@ namespace WiFiAudioConnector
             _cbAutoConnect.Unchecked += (s, e) => { _app.CurrentSettings.AutoConnect = false; _app.CurrentSettings.Save(); };
             optsPanel.Children.Add(_cbAutoConnect);
 
+            // Hotkey row
+            var hotkeyRow = new DockPanel { Margin = new Thickness(0, 8, 0, 0) };
+            var btnConfigHotkey = new Button
+            {
+                Content = "⚙ 快捷键",
+                Width = 62,
+                Height = 22,
+                FontSize = 11,
+                Background = new SolidColorBrush(Color.FromArgb(180, 50, 55, 68)),
+                Foreground = System.Windows.Media.Brushes.White,
+                BorderBrush = new SolidColorBrush(Color.FromArgb(80, 255, 255, 255)),
+                Cursor = System.Windows.Input.Cursors.Hand,
+                HorizontalAlignment = HorizontalAlignment.Right
+            };
+            btnConfigHotkey.Click += (s, e) => _app.ShowHotkeyConfigWindow();
+            DockPanel.SetDock(btnConfigHotkey, Dock.Right);
+
+            _txtHotkeyDisplay = new TextBlock
+            {
+                Text = GetHotkeySummary(),
+                FontSize = 11,
+                Foreground = new SolidColorBrush(Color.FromRgb(200, 210, 225)),
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            hotkeyRow.Children.Add(btnConfigHotkey);
+            hotkeyRow.Children.Add(_txtHotkeyDisplay);
+            optsPanel.Children.Add(hotkeyRow);
+
             optsCard.Child = optsPanel;
             root.Children.Add(optsCard);
 
@@ -1206,6 +2157,7 @@ namespace WiFiAudioConnector
                 }
 
                 _app.CurrentSettings.Save();
+                UpdateHotkeyText();
             }
         }
 
@@ -1239,6 +2191,52 @@ namespace WiFiAudioConnector
 
             if (CheckAccess()) act();
             else Dispatcher.BeginInvoke(act);
+        }
+
+        public void SyncCurrentDeviceToUI()
+        {
+            Action act = () =>
+            {
+                if (_cbDevices != null && _deviceList != null)
+                {
+                    for (int i = 0; i < _deviceList.Count; i++)
+                    {
+                        if (_deviceList[i].Target == _app.CurrentSettings.Target)
+                        {
+                            _cbDevices.SelectedIndex = i;
+                            break;
+                        }
+                    }
+                }
+                if (_tbIp != null) _tbIp.Text = _app.CurrentSettings.DeviceIp;
+                if (_tbPort != null) _tbPort.Text = _app.CurrentSettings.Port.ToString();
+                UpdateHotkeyText();
+            };
+            if (CheckAccess()) act();
+            else Dispatcher.BeginInvoke(act);
+        }
+
+        public void UpdateHotkeyText()
+        {
+            if (_txtHotkeyDisplay != null)
+            {
+                _txtHotkeyDisplay.Text = GetHotkeySummary();
+            }
+        }
+
+        private string GetHotkeySummary()
+        {
+            string target = _app.CurrentSettings.Target;
+            DeviceHotkeyBinding b = null;
+            if (!string.IsNullOrEmpty(target) && _app.CurrentSettings.DeviceHotkeys.TryGetValue(target, out b))
+            {
+                if (b.Enabled && b.Key != Key.None)
+                {
+                    return string.Format("当前模式快捷键: {0}", HotkeyManager.FormatHotkey(b.Modifiers, b.Key));
+                }
+                return "当前模式快捷键: (未设置)";
+            }
+            return "专属快捷键: 点击设置";
         }
     }
 }
