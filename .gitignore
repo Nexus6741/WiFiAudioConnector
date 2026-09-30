@@ -1,0 +1,19 @@
+# Compiled binaries
+WiFiAudioConnector.exe
+*.exe.config
+
+# Logs and temp files
+run.log
+*.tmp
+*.bak
+*.final
+
+# Local user configuration
+WiFiAudioConnector.cfg
+
+# Visual Studio & Windows artifacts
+.vs/
+*.suo
+*.user
+Thumbs.db
+.DS_Store

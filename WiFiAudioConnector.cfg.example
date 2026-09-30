@@ -1,0 +1,15 @@
+DeviceName=Xiaomi 15 Pro
+DeviceIp=192.168.31.239
+Port=5555
+Target=192.168.31.239:5555
+Codec=raw
+MutePhone=1
+AutoConnect=1
+ShowNotifications=1
+MasterVolume=80
+IsMuted=0
+SyncPhoneVolume=1
+MuteOnDisconnect=1
+HotkeyEnabled=1
+HotkeyModifiers=6
+HotkeyKey=66
