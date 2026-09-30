@@ -2836,7 +2836,7 @@ namespace WiFiAudioConnector
                         bufferMs = 50;
                     }
 
-                    string modeArg = _settings.MutePhone ? "--audio-source=playback" : "--audio-source=playback --audio-dup";
+                    string modeArg = _settings.MutePhone ? "--audio-source=output" : "--audio-source=playback --audio-dup";
                     string scrcpyArgs = string.Format("-s {0} --no-video --no-window {1} {2} --audio-buffer={3}", target, codecArg, modeArg, bufferMs);
 
                     var psiScrcpy = new ProcessStartInfo
