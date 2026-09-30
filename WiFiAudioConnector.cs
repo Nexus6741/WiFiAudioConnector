@@ -527,17 +527,24 @@ namespace WiFiAudioConnector
     public class TrayWheelVolumeController : IDisposable
     {
         private const int WH_MOUSE_LL = 14;
+        private const int WH_KEYBOARD_LL = 13;
         private const int WM_MOUSEMOVE = 0x0200;
         private const int WM_LBUTTONDOWN = 0x0201;
         private const int WM_RBUTTONDOWN = 0x0204;
         private const int WM_MBUTTONDOWN = 0x0207;
         private const int WM_MOUSEWHEEL = 0x020A;
+        private const int WM_KEYDOWN = 0x0100;
+        private const int WM_SYSKEYDOWN = 0x0104;
 
-        private delegate IntPtr LowLevelMouseProc(int nCode, IntPtr wParam, IntPtr lParam);
-        private LowLevelMouseProc _proc;
+        private delegate IntPtr LowLevelProc(int nCode, IntPtr wParam, IntPtr lParam);
+        private LowLevelProc _mouseProc;
+        private LowLevelProc _kbdProc;
         private IntPtr _hookId = IntPtr.Zero;
+        private IntPtr _kbdHookId = IntPtr.Zero;
         private NotifyIcon _notifyIcon;
         private Action<int> _onVolumeDelta;
+        private Action<int, string> _onMediaKey;
+        private DateTime _lastMediaKeyTime = DateTime.MinValue;
 
         [StructLayout(LayoutKind.Sequential)]
         private struct POINT { public int x; public int y; }
@@ -568,7 +575,7 @@ namespace WiFiAudioConnector
         private static extern int Shell_NotifyIconGetRect([In] ref NOTIFYICONIDENTIFIER identifier, [Out] out RECT iconLocation);
 
         [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
-        private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelMouseProc lpfn, IntPtr hMod, uint dwThreadId);
+        private static extern IntPtr SetWindowsHookEx(int idHook, LowLevelProc lpfn, IntPtr hMod, uint dwThreadId);
 
         [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
         [return: MarshalAs(UnmanagedType.Bool)]
@@ -577,6 +584,9 @@ namespace WiFiAudioConnector
         [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
         private static extern IntPtr CallNextHookEx(IntPtr hhk, int nCode, IntPtr wParam, IntPtr lParam);
 
+        [DllImport("user32.dll")]
+        private static extern short GetKeyState(int nVirtKey);
+
         [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
         private static extern IntPtr GetModuleHandle(string lpModuleName);
 
@@ -584,10 +594,11 @@ namespace WiFiAudioConnector
         private System.Drawing.Point _lastMousePos = System.Drawing.Point.Empty;
         private bool _isHoveringIcon = false;
 
-        public TrayWheelVolumeController(NotifyIcon notifyIcon, Action<int> onVolumeDelta)
+        public TrayWheelVolumeController(NotifyIcon notifyIcon, Action<int> onVolumeDelta, Action<int, string> onMediaKey)
         {
             _notifyIcon = notifyIcon;
             _onVolumeDelta = onVolumeDelta;
+            _onMediaKey = onMediaKey;
 
             _notifyIcon.MouseMove += (s, e) =>
             {
@@ -596,11 +607,14 @@ namespace WiFiAudioConnector
                 _isHoveringIcon = true;
             };
 
-            _proc = HookCallback;
+            _mouseProc = HookCallback;
+            _kbdProc = KeyboardHookCallback;
             using (var curProc = Process.GetCurrentProcess())
             using (var curMod = curProc.MainModule)
             {
-                _hookId = SetWindowsHookEx(WH_MOUSE_LL, _proc, GetModuleHandle(curMod.ModuleName), 0);
+                IntPtr hMod = GetModuleHandle(curMod.ModuleName);
+                _hookId = SetWindowsHookEx(WH_MOUSE_LL, _mouseProc, hMod, 0);
+                _kbdHookId = SetWindowsHookEx(WH_KEYBOARD_LL, _kbdProc, hMod, 0);
             }
         }
 
@@ -629,6 +643,35 @@ namespace WiFiAudioConnector
             }
             catch { }
             return System.Drawing.Rectangle.Empty;
+        }
+
+        private bool IsCursorOverTrayIcon()
+        {
+            try
+            {
+                var pt = System.Windows.Forms.Cursor.Position;
+                var rect = GetIconRect();
+                if (!rect.IsEmpty)
+                {
+                    var expanded = new System.Drawing.Rectangle(rect.X - 4, rect.Y - 4, rect.Width + 8, rect.Height + 8);
+                    if (expanded.Contains(pt)) return true;
+                }
+                if (_isHoveringIcon)
+                {
+                    int dx = Math.Abs(pt.X - _lastMousePos.X);
+                    int dy = Math.Abs(pt.Y - _lastMousePos.Y);
+                    if (dx <= 4 && dy <= 4)
+                    {
+                        return true;
+                    }
+                    if (dx <= 36 && dy <= 36 && (DateTime.Now - _lastHoverTime).TotalSeconds < 15)
+                    {
+                        return true;
+                    }
+                }
+            }
+            catch { }
+            return false;
         }
 
         private IntPtr HookCallback(int nCode, IntPtr wParam, IntPtr lParam)
@@ -696,12 +739,59 @@ namespace WiFiAudioConnector
             return CallNextHookEx(_hookId, nCode, wParam, lParam);
         }
 
+        private IntPtr KeyboardHookCallback(int nCode, IntPtr wParam, IntPtr lParam)
+        {
+            if (nCode >= 0)
+            {
+                int msg = (int)wParam;
+                if (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN)
+                {
+                    int vkCode = Marshal.ReadInt32(lParam);
+                    if (vkCode == 0x41 || vkCode == 0x44 || vkCode == 0x20) // A (0x41), D (0x44), Space (0x20)
+                    {
+                        bool hasModifier = ((GetKeyState(0x10) & 0x8000) != 0) || // Shift
+                                           ((GetKeyState(0x11) & 0x8000) != 0) || // Ctrl
+                                           ((GetKeyState(0x12) & 0x8000) != 0) || // Alt
+                                           ((GetKeyState(0x5B) & 0x8000) != 0) || // LWin
+                                           ((GetKeyState(0x5C) & 0x8000) != 0);   // RWin
+
+                        if (!hasModifier && IsCursorOverTrayIcon())
+                        {
+                            if ((DateTime.Now - _lastMediaKeyTime).TotalMilliseconds >= 280)
+                            {
+                                _lastMediaKeyTime = DateTime.Now;
+                                if (vkCode == 0x41) // A -> 上一曲
+                                {
+                                    if (_onMediaKey != null) _onMediaKey(88, "⏮ 上一首");
+                                }
+                                else if (vkCode == 0x44) // D -> 下一曲
+                                {
+                                    if (_onMediaKey != null) _onMediaKey(87, "⏭ 下一首");
+                                }
+                                else if (vkCode == 0x20) // Space -> 播放/暂停
+                                {
+                                    if (_onMediaKey != null) _onMediaKey(85, "⏯ 播放 / 暂停");
+                                }
+                            }
+                            return (IntPtr)1; // Consume key event when hovering over tray icon
+                        }
+                    }
+                }
+            }
+            return CallNextHookEx(_kbdHookId, nCode, wParam, lParam);
+        }
+
         public void Dispose()
         {
             if (_hookId != IntPtr.Zero)
             {
                 UnhookWindowsHookEx(_hookId);
                 _hookId = IntPtr.Zero;
+            }
+            if (_kbdHookId != IntPtr.Zero)
+            {
+                UnhookWindowsHookEx(_kbdHookId);
+                _kbdHookId = IntPtr.Zero;
             }
         }
     }
@@ -1924,7 +2014,6 @@ namespace WiFiAudioConnector
         private BatteryInfo _lastBatteryInfo = null;
         public BatteryInfo LastBatteryInfo { get { return _lastBatteryInfo; } }
         private bool _hasAlertedLowBattery = false;
-        private DispatcherTimer _singleClickTimer = null;
 
         public static void LogLine(string s)
         {
@@ -2029,9 +2118,14 @@ namespace WiFiAudioConnector
             _notifyIcon.Visible = true;
 
             var menu = new ContextMenuStrip();
-            menu.Items.Add("⏯ 播放 / 暂停 (中键点击)", null, (s, e) => SendMediaKey(85, "⏯ 播放 / 暂停"));
-            menu.Items.Add("⏮ 上一首 (左键双击)", null, (s, e) => SendMediaKey(88, "⏮ 上一首"));
-            menu.Items.Add("⏭ 下一首 (右键双击)", null, (s, e) => SendMediaKey(87, "⏭ 下一首"));
+            menu.Items.Add("⚡ 一键连接 / 断开 (中键点击)", null, (s, e) =>
+            {
+                if (IsConnected) Disconnect();
+                else ConnectAsync();
+            });
+            menu.Items.Add("⏯ 播放 / 暂停 (悬浮按空格)", null, (s, e) => SendMediaKey(85, "⏯ 播放 / 暂停"));
+            menu.Items.Add("⏮ 上一首 (悬浮按 A)", null, (s, e) => SendMediaKey(88, "⏮ 上一首"));
+            menu.Items.Add("⏭ 下一首 (悬浮按 D)", null, (s, e) => SendMediaKey(87, "⏭ 下一首"));
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("连接当前设备", null, (s, e) => ConnectAsync());
             menu.Items.Add("断开连接", null, (s, e) => Disconnect());
@@ -2069,40 +2163,26 @@ namespace WiFiAudioConnector
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("退出", null, (s, e) => ExitApp());
 
-            _singleClickTimer = new DispatcherTimer();
-            _singleClickTimer.Interval = TimeSpan.FromMilliseconds(220);
-            _singleClickTimer.Tick += (s, e) =>
-            {
-                _singleClickTimer.Stop();
-                ToggleFlyout();
-            };
-
             _notifyIcon.ContextMenuStrip = menu;
             _notifyIcon.MouseClick += (s, e) =>
             {
                 if (e.Button == MouseButtons.Left)
                 {
-                    _singleClickTimer.Stop();
-                    _singleClickTimer.Start();
+                    ToggleFlyout();
                 }
                 else if (e.Button == MouseButtons.Middle)
                 {
-                    SendMediaKey(85, "⏯ 播放 / 暂停");
+                    if (IsConnected)
+                    {
+                        Disconnect();
+                    }
+                    else
+                    {
+                        ConnectAsync();
+                    }
                 }
             };
-            _notifyIcon.MouseDoubleClick += (s, e) =>
-            {
-                _singleClickTimer.Stop();
-                if (e.Button == MouseButtons.Left)
-                {
-                    SendMediaKey(88, "⏮ 上一首");
-                }
-                else if (e.Button == MouseButtons.Right)
-                {
-                    SendMediaKey(87, "⏭ 下一首");
-                }
-            };
-            _trayWheelController = new TrayWheelVolumeController(_notifyIcon, OnTrayWheelVolumeDelta);
+            _trayWheelController = new TrayWheelVolumeController(_notifyIcon, OnTrayWheelVolumeDelta, (key, desc) => SendMediaKey(key, desc));
         }
 
         private void OnTrayWheelVolumeDelta(int delta)
@@ -2499,6 +2579,10 @@ namespace WiFiAudioConnector
             _isConnecting = true;
             _flyout.UpdateState(ConnectionState.Connecting);
             _notifyIcon.Text = "WiFi 音频连接器 (正在连接...)";
+            if (_volumeOsd != null)
+            {
+                _volumeOsd.ShowHint("正在连接", string.Format("正在连接 {0}...", _settings.DeviceName));
+            }
 
             string adbPath = FindToolPath("adb.exe");
             string scrcpyPath = FindToolPath("scrcpy.exe");
@@ -2746,6 +2830,7 @@ namespace WiFiAudioConnector
                 _flyout.UpdateBatteryUI(null);
                 ShowNotification("蓝牙音频已断开", string.Format("{0} [蓝牙]\n音频直通已关闭", devName), ToolTipIcon.Info);
                 if (_flyout != null) _flyout.SyncCurrentDeviceToUI();
+                if (_volumeOsd != null) _volumeOsd.ShowHint("已断开连接", "蓝牙音频直通已关闭");
                 return;
             }
 
@@ -2773,6 +2858,10 @@ namespace WiFiAudioConnector
             UpdateTrayIcon(false);
             _notifyIcon.Text = "WiFi 音频连接器 (未连接)";
             _flyout.UpdateState(ConnectionState.Disconnected);
+            if (_volumeOsd != null)
+            {
+                _volumeOsd.ShowHint("已断开连接", "音频传输已停止");
+            }
         }
 
         public void ToggleFlyout()
