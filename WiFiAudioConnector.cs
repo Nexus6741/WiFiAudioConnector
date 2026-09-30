@@ -98,6 +98,7 @@ namespace WiFiAudioConnector
         public string Codec = "raw"; // "raw", "opus320", "opus128"
         public bool MutePhone = true;
         public bool AutoConnect = true;
+        public bool ShowNotifications = true;
         public bool HotkeyEnabled = true;
         public ModifierKeys HotkeyModifiers = ModifierKeys.Control | ModifierKeys.Alt;
         public Key HotkeyKey = Key.W;
@@ -122,6 +123,7 @@ namespace WiFiAudioConnector
                 sb.AppendLine("Codec=" + Codec);
                 sb.AppendLine("MutePhone=" + (MutePhone ? "1" : "0"));
                 sb.AppendLine("AutoConnect=" + (AutoConnect ? "1" : "0"));
+                sb.AppendLine("ShowNotifications=" + (ShowNotifications ? "1" : "0"));
                 sb.AppendLine("HotkeyEnabled=" + (HotkeyEnabled ? "1" : "0"));
                 sb.AppendLine("HotkeyModifiers=" + (int)HotkeyModifiers);
                 sb.AppendLine("HotkeyKey=" + (int)HotkeyKey);
@@ -166,6 +168,7 @@ namespace WiFiAudioConnector
                             else if (k == "Codec") s.Codec = v;
                             else if (k == "MutePhone") s.MutePhone = (v == "1");
                             else if (k == "AutoConnect") s.AutoConnect = (v == "1");
+                            else if (k == "ShowNotifications") s.ShowNotifications = (v != "0");
                             else if (k == "HotkeyEnabled") s.HotkeyEnabled = (v == "1");
                             else if (k == "HotkeyModifiers") { int m; if (int.TryParse(v, out m)) s.HotkeyModifiers = (ModifierKeys)m; }
                             else if (k == "HotkeyKey") { int kCode; if (int.TryParse(v, out kCode)) s.HotkeyKey = (Key)kCode; }
@@ -918,6 +921,7 @@ namespace WiFiAudioConnector
         private bool _isConnecting = false;
         private HotkeyManager _hotkeyManager = null;
         private HotkeyConfigWindow _hotkeyWin = null;
+        private ToolStripMenuItem _notifyMenuItem = null;
 
         public static void LogLine(string s)
         {
@@ -1013,6 +1017,17 @@ namespace WiFiAudioConnector
                 SetStartupRegistry(_settings.AutoConnect);
             };
             menu.Items.Add(autoStartItem);
+
+            _notifyMenuItem = new ToolStripMenuItem("显示连接提示通知");
+            _notifyMenuItem.Checked = _settings.ShowNotifications;
+            _notifyMenuItem.Click += (s, e) =>
+            {
+                _settings.ShowNotifications = !_settings.ShowNotifications;
+                _notifyMenuItem.Checked = _settings.ShowNotifications;
+                _settings.Save();
+                SyncNotificationState();
+            };
+            menu.Items.Add(_notifyMenuItem);
 
             menu.Items.Add("打开主面板", null, (s, e) => ShowFlyout());
             menu.Items.Add(new ToolStripSeparator());
@@ -1402,7 +1417,7 @@ namespace WiFiAudioConnector
                 string desc = _settings.Codec == "raw" ? "Raw PCM 无损" : "Opus 320K";
                 string modeTag = isTcp ? "Wi-Fi 无线" : "USB 有线";
                 _notifyIcon.Text = string.Format("WiFi 音频连接器 - {0} [{1}] (已连接)", _settings.DeviceName, modeTag);
-                _notifyIcon.ShowBalloonTip(2000, "设备已连接", string.Format("{0} [{1}]\n音频流已就绪 ({2})，直通电脑播放", _settings.DeviceName, modeTag, desc), ToolTipIcon.Info);
+                ShowNotification("设备已连接", string.Format("{0} [{1}]\n音频流已就绪 ({2})，直通电脑播放", _settings.DeviceName, modeTag, desc), ToolTipIcon.Info);
                 _flyout.UpdateState(ConnectionState.Connected);
 
                 // Watchdog task
@@ -1429,7 +1444,7 @@ namespace WiFiAudioConnector
                 UpdateTrayIcon(false);
                 _notifyIcon.Text = "WiFi 音频连接器 (未连接)";
                 _flyout.UpdateState(ConnectionState.Disconnected);
-                _notifyIcon.ShowBalloonTip(2500, "连接失败", "无法连接到设备，请确认手机已开机且处于连接状态", ToolTipIcon.Error);
+                ShowNotification("连接失败", "无法连接到设备，请确认手机已开机且处于连接状态", ToolTipIcon.Error);
             }
         }
 
@@ -1465,6 +1480,10 @@ namespace WiFiAudioConnector
         public void ShowFlyout()
         {
             PositionFlyoutAboveTray();
+            if (_flyout != null)
+            {
+                _flyout.SyncNotificationCheckbox();
+            }
             _flyout.Show();
             _flyout.Activate();
         }
@@ -1539,7 +1558,7 @@ namespace WiFiAudioConnector
             if (IsConnected && string.Equals(_currentActiveTarget, target, StringComparison.OrdinalIgnoreCase))
             {
                 Disconnect();
-                _notifyIcon.ShowBalloonTip(1500, "快捷键已触发", string.Format("已断开: {0}", devName), ToolTipIcon.Info);
+                ShowNotification("快捷键已触发", string.Format("已断开: {0}", devName), ToolTipIcon.Info);
             }
             else
             {
@@ -1568,7 +1587,7 @@ namespace WiFiAudioConnector
                     _flyout.SyncCurrentDeviceToUI();
                 }
 
-                _notifyIcon.ShowBalloonTip(1500, "快捷键已触发", string.Format("正在快速直连: {0}...", devName), ToolTipIcon.Info);
+                ShowNotification("快捷键已触发", string.Format("正在快速直连: {0}...", devName), ToolTipIcon.Info);
                 ConnectAsync(target);
             }
         }
@@ -1594,11 +1613,29 @@ namespace WiFiAudioConnector
             }
         }
 
+        public void SyncNotificationState()
+        {
+            if (_notifyMenuItem != null)
+            {
+                _notifyMenuItem.Checked = _settings.ShowNotifications;
+            }
+            if (_flyout != null)
+            {
+                _flyout.SyncNotificationCheckbox();
+            }
+        }
+
         public void ShowNotification(string title, string msg)
         {
+            ShowNotification(title, msg, ToolTipIcon.Info);
+        }
+
+        public void ShowNotification(string title, string msg, ToolTipIcon icon)
+        {
+            if (!_settings.ShowNotifications) return;
             if (_notifyIcon != null)
             {
-                _notifyIcon.ShowBalloonTip(2000, title, msg, ToolTipIcon.Info);
+                _notifyIcon.ShowBalloonTip(2000, title, msg, icon);
             }
         }
 
@@ -1640,6 +1677,7 @@ namespace WiFiAudioConnector
         private RadioButton _rbOpus128;
         private CheckBox _cbMutePhone;
         private CheckBox _cbAutoConnect;
+        private CheckBox _cbNotifications;
         private TextBox _tbIp;
         private TextBox _tbPort;
         private TextBlock _txtHotkeyDisplay;
@@ -1661,7 +1699,7 @@ namespace WiFiAudioConnector
         private void BuildUI()
         {
             Width = 370;
-            Height = 555;
+            Height = 580;
             WindowStyle = WindowStyle.None;
             AllowsTransparency = true;
             Background = System.Windows.Media.Brushes.Transparent;
@@ -2006,11 +2044,33 @@ namespace WiFiAudioConnector
                 Content = "开机自启并自动连接当前设备",
                 Foreground = System.Windows.Media.Brushes.White,
                 FontSize = 11,
+                Margin = new Thickness(0, 0, 0, 6),
                 IsChecked = _app.CurrentSettings.AutoConnect
             };
             _cbAutoConnect.Checked += (s, e) => { _app.CurrentSettings.AutoConnect = true; _app.CurrentSettings.Save(); };
             _cbAutoConnect.Unchecked += (s, e) => { _app.CurrentSettings.AutoConnect = false; _app.CurrentSettings.Save(); };
             optsPanel.Children.Add(_cbAutoConnect);
+
+            _cbNotifications = new CheckBox
+            {
+                Content = "显示连接与断开桌面提示通知",
+                Foreground = System.Windows.Media.Brushes.White,
+                FontSize = 11,
+                IsChecked = _app.CurrentSettings.ShowNotifications
+            };
+            _cbNotifications.Checked += (s, e) =>
+            {
+                _app.CurrentSettings.ShowNotifications = true;
+                _app.CurrentSettings.Save();
+                _app.SyncNotificationState();
+            };
+            _cbNotifications.Unchecked += (s, e) =>
+            {
+                _app.CurrentSettings.ShowNotifications = false;
+                _app.CurrentSettings.Save();
+                _app.SyncNotificationState();
+            };
+            optsPanel.Children.Add(_cbNotifications);
 
             // Hotkey row
             var hotkeyRow = new DockPanel { Margin = new Thickness(0, 8, 0, 0) };
@@ -2237,6 +2297,19 @@ namespace WiFiAudioConnector
                 return "当前模式快捷键: (未设置)";
             }
             return "专属快捷键: 点击设置";
+        }
+
+        public void SyncNotificationCheckbox()
+        {
+            Action act = () =>
+            {
+                if (_cbNotifications != null && _cbNotifications.IsChecked != _app.CurrentSettings.ShowNotifications)
+                {
+                    _cbNotifications.IsChecked = _app.CurrentSettings.ShowNotifications;
+                }
+            };
+            if (CheckAccess()) act();
+            else Dispatcher.BeginInvoke(act);
         }
     }
 }
