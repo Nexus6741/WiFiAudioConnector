@@ -815,20 +815,21 @@ namespace WiFiAudioConnector
         private TextBlock _tagText;
         private Border _trackBorder;
         private Border _fillBorder;
-        private TextBlock _hintText;
+        private StackPanel _hintPanel;
+        private TextBlock _hintTitle;
+        private TextBlock _hintSubtitle;
         private StackPanel _volumeContent;
         private DispatcherTimer _fadeTimer;
 
         public VolumeOsdWindow()
         {
-            Width = 210;
-            Height = 56;
             WindowStyle = WindowStyle.None;
             AllowsTransparency = true;
             Background = System.Windows.Media.Brushes.Transparent;
             Topmost = true;
             ShowInTaskbar = false;
             Focusable = false;
+            SizeToContent = SizeToContent.WidthAndHeight;
 
             BuildUI();
 
@@ -862,6 +863,9 @@ namespace WiFiAudioConnector
                     new System.Windows.Point(1, 1)),
                 BorderThickness = new Thickness(1.8),
                 Padding = new Thickness(14, 8, 16, 8),
+                MinWidth = 210,
+                MinHeight = 54,
+                MaxWidth = 350,
                 Effect = new DropShadowEffect
                 {
                     BlurRadius = 18,
@@ -936,17 +940,29 @@ namespace WiFiAudioConnector
             _volumeContent.Children.Add(_trackBorder);
             rightStack.Children.Add(_volumeContent);
 
-            // Hint Text
-            _hintText = new TextBlock
+            // Hint Panel (Title + Subtitle)
+            _hintPanel = new StackPanel { VerticalAlignment = VerticalAlignment.Center, Visibility = Visibility.Collapsed };
+            _hintTitle = new TextBlock
+            {
+                Text = "",
+                FontSize = 12,
+                FontWeight = FontWeights.Bold,
+                Foreground = new SolidColorBrush(Color.FromRgb(56, 189, 248)),
+                FontFamily = new FontFamily("Segoe UI, Microsoft YaHei UI"),
+                Margin = new Thickness(0, 0, 0, 2)
+            };
+            _hintSubtitle = new TextBlock
             {
                 Text = "",
                 FontSize = 10.5,
-                Foreground = new SolidColorBrush(Color.FromRgb(147, 197, 253)),
+                Foreground = new SolidColorBrush(Color.FromArgb(220, 226, 232, 240)),
                 FontFamily = new FontFamily("Microsoft YaHei UI, Segoe UI"),
                 TextWrapping = TextWrapping.Wrap,
-                Visibility = Visibility.Collapsed
+                MaxWidth = 250
             };
-            rightStack.Children.Add(_hintText);
+            _hintPanel.Children.Add(_hintTitle);
+            _hintPanel.Children.Add(_hintSubtitle);
+            rightStack.Children.Add(_hintPanel);
 
             rootDock.Children.Add(rightStack);
             capsuleBorder.Child = rootDock;
@@ -955,9 +971,12 @@ namespace WiFiAudioConnector
 
         private void PositionBottomRight()
         {
+            UpdateLayout();
             var workArea = SystemParameters.WorkArea;
-            Left = workArea.Right - Width - 24;
-            Top = workArea.Bottom - Height - 24;
+            double w = ActualWidth > 0 ? ActualWidth : 210;
+            double h = ActualHeight > 0 ? ActualHeight : 54;
+            Left = workArea.Right - w - 24;
+            Top = workArea.Bottom - h - 24;
         }
 
         public void ShowVolume(int volumePercent, bool isMuted, string tag)
@@ -965,7 +984,7 @@ namespace WiFiAudioConnector
             Dispatcher.BeginInvoke(new Action(() =>
             {
                 _volumeContent.Visibility = Visibility.Visible;
-                _hintText.Visibility = Visibility.Collapsed;
+                _hintPanel.Visibility = Visibility.Collapsed;
 
                 if (isMuted)
                 {
@@ -993,6 +1012,7 @@ namespace WiFiAudioConnector
                 if (!IsVisible) Show();
 
                 _fadeTimer.Stop();
+                _fadeTimer.Interval = TimeSpan.FromMilliseconds(1000);
                 _fadeTimer.Start();
             }));
         }
@@ -1002,9 +1022,47 @@ namespace WiFiAudioConnector
             Dispatcher.BeginInvoke(new Action(() =>
             {
                 _volumeContent.Visibility = Visibility.Collapsed;
-                _hintText.Visibility = Visibility.Visible;
-                _hintText.Text = hint;
-                _iconText.Text = "ℹ️";
+                _hintPanel.Visibility = Visibility.Visible;
+
+                _hintTitle.Text = title ?? "";
+                _hintTitle.Visibility = string.IsNullOrEmpty(title) ? Visibility.Collapsed : Visibility.Visible;
+
+                _hintSubtitle.Text = hint ?? "";
+                _hintSubtitle.Visibility = string.IsNullOrEmpty(hint) ? Visibility.Collapsed : Visibility.Visible;
+
+                string combined = ((title ?? "") + " " + (hint ?? "")).ToLowerInvariant();
+                if (combined.Contains("已就绪") || combined.Contains("已连接") || combined.Contains("成功"))
+                {
+                    _iconText.Text = "⚡";
+                }
+                else if (combined.Contains("正在连接") || combined.Contains("直连") || combined.Contains("重载"))
+                {
+                    _iconText.Text = "🔄";
+                }
+                else if (combined.Contains("断开") || combined.Contains("停止"))
+                {
+                    _iconText.Text = "🔌";
+                }
+                else if (combined.Contains("快捷键"))
+                {
+                    _iconText.Text = "⌨️";
+                }
+                else if (combined.Contains("媒体") || combined.Contains("播放") || combined.Contains("上一首") || combined.Contains("下一首"))
+                {
+                    _iconText.Text = "🎵";
+                }
+                else if (combined.Contains("电量"))
+                {
+                    _iconText.Text = "🔋";
+                }
+                else if (combined.Contains("失败") || combined.Contains("错误"))
+                {
+                    _iconText.Text = "⚠️";
+                }
+                else
+                {
+                    _iconText.Text = "ℹ️";
+                }
 
                 PositionBottomRight();
 
@@ -1014,6 +1072,7 @@ namespace WiFiAudioConnector
                 if (!IsVisible) Show();
 
                 _fadeTimer.Stop();
+                _fadeTimer.Interval = TimeSpan.FromMilliseconds(1800);
                 _fadeTimer.Start();
             }));
         }
@@ -1047,7 +1106,12 @@ namespace WiFiAudioConnector
         public string LatencyMode = "balanced"; // "game", "balanced", "smooth"
         public bool MutePhone = true;
         public bool AutoConnect = true;
-        public bool ShowNotifications = true;
+        public string NotificationMode = "osd"; // "osd", "windows", "none"
+        public bool ShowNotifications
+        {
+            get { return NotificationMode != "none"; }
+            set { NotificationMode = value ? (NotificationMode == "none" ? "osd" : NotificationMode) : "none"; }
+        }
         public int MasterVolume = 100;
         public bool IsMuted = false;
         public bool SyncPhoneVolume = true;
@@ -1077,6 +1141,7 @@ namespace WiFiAudioConnector
                 sb.AppendLine("LatencyMode=" + LatencyMode);
                 sb.AppendLine("MutePhone=" + (MutePhone ? "1" : "0"));
                 sb.AppendLine("AutoConnect=" + (AutoConnect ? "1" : "0"));
+                sb.AppendLine("NotificationMode=" + NotificationMode);
                 sb.AppendLine("ShowNotifications=" + (ShowNotifications ? "1" : "0"));
                 sb.AppendLine("MasterVolume=" + MasterVolume);
                 sb.AppendLine("IsMuted=" + (IsMuted ? "1" : "0"));
@@ -1128,7 +1193,14 @@ namespace WiFiAudioConnector
                             else if (k == "LatencyMode") s.LatencyMode = v;
                             else if (k == "MutePhone") s.MutePhone = (v == "1");
                             else if (k == "AutoConnect") s.AutoConnect = (v == "1");
-                            else if (k == "ShowNotifications") s.ShowNotifications = (v != "0");
+                            else if (k == "NotificationMode") s.NotificationMode = v.ToLowerInvariant();
+                            else if (k == "ShowNotifications")
+                            {
+                                if (string.IsNullOrEmpty(s.NotificationMode))
+                                {
+                                    s.NotificationMode = (v != "0") ? "osd" : "none";
+                                }
+                            }
                             else if (k == "MasterVolume") { int vInt; if (int.TryParse(v, out vInt)) s.MasterVolume = Math.Max(0, Math.Min(100, vInt)); }
                             else if (k == "IsMuted") s.IsMuted = (v == "1");
                             else if (k == "SyncPhoneVolume") s.SyncPhoneVolume = (v != "0");
@@ -1157,6 +1229,11 @@ namespace WiFiAudioConnector
                 }
             }
             catch { }
+
+            if (s.NotificationMode != "osd" && s.NotificationMode != "windows" && s.NotificationMode != "none")
+            {
+                s.NotificationMode = s.ShowNotifications ? "osd" : "none";
+            }
 
             if (s.Target == "Bluetooth A2DP:5555" || s.Target == "Bluetooth A2DP" || s.DeviceIp == "Bluetooth A2DP")
             {
@@ -1996,7 +2073,9 @@ namespace WiFiAudioConnector
         public List<DeviceItem> LastDiscoveredDevices = new List<DeviceItem>();
         private HotkeyManager _hotkeyManager = null;
         private HotkeyConfigWindow _hotkeyWin = null;
-        private ToolStripMenuItem _notifyMenuItem = null;
+        private ToolStripMenuItem _notifyMenuOsd = null;
+        private ToolStripMenuItem _notifyMenuWin = null;
+        private ToolStripMenuItem _notifyMenuNone = null;
         private TrayWheelVolumeController _trayWheelController = null;
         private VolumeOsdWindow _volumeOsd = null;
         private Process _logcatProc = null;
@@ -2148,16 +2227,15 @@ namespace WiFiAudioConnector
             };
             menu.Items.Add(autoStartItem);
 
-            _notifyMenuItem = new ToolStripMenuItem("显示连接提示通知");
-            _notifyMenuItem.Checked = _settings.ShowNotifications;
-            _notifyMenuItem.Click += (s, e) =>
-            {
-                _settings.ShowNotifications = !_settings.ShowNotifications;
-                _notifyMenuItem.Checked = _settings.ShowNotifications;
-                _settings.Save();
-                SyncNotificationState();
-            };
-            menu.Items.Add(_notifyMenuItem);
+            var notifySubMenu = new ToolStripMenuItem("提示通知方式");
+            _notifyMenuOsd = new ToolStripMenuItem("桌面 OSD 悬浮胶囊", null, (s, e) => SetNotificationMode("osd"));
+            _notifyMenuWin = new ToolStripMenuItem("Windows 系统气泡", null, (s, e) => SetNotificationMode("windows"));
+            _notifyMenuNone = new ToolStripMenuItem("关闭提示通知", null, (s, e) => SetNotificationMode("none"));
+            notifySubMenu.DropDownItems.Add(_notifyMenuOsd);
+            notifySubMenu.DropDownItems.Add(_notifyMenuWin);
+            notifySubMenu.DropDownItems.Add(_notifyMenuNone);
+            menu.Items.Add(notifySubMenu);
+            SyncNotificationState();
 
             menu.Items.Add("打开主面板", null, (s, e) => ShowFlyout());
             menu.Items.Add(new ToolStripSeparator());
@@ -2579,10 +2657,7 @@ namespace WiFiAudioConnector
             _isConnecting = true;
             _flyout.UpdateState(ConnectionState.Connecting);
             _notifyIcon.Text = "WiFi 音频连接器 (正在连接...)";
-            if (_volumeOsd != null)
-            {
-                _volumeOsd.ShowHint("正在连接", string.Format("正在连接 {0}...", _settings.DeviceName));
-            }
+            ShowNotification("正在连接", string.Format("正在连接 {0}...", _settings.DeviceName));
 
             string adbPath = FindToolPath("adb.exe");
             string scrcpyPath = FindToolPath("scrcpy.exe");
@@ -2714,10 +2789,7 @@ namespace WiFiAudioConnector
                 _flyout.UpdateState(ConnectionState.Connected);
                 StartPhoneVolumeSync(target, _scrcpyProc.Id);
                 StartBatteryMonitor(target);
-                if (_volumeOsd != null)
-                {
-                    _volumeOsd.ShowHint("音频流已就绪", string.Format("{0} [{1}]\n{2} | {3}ms 延迟缓冲", _settings.DeviceName, modeTag, desc, curBuffer));
-                }
+                ShowNotification("音频流已就绪", string.Format("{0} [{1}]\n{2} | {3}ms 延迟缓冲", _settings.DeviceName, modeTag, desc, curBuffer));
 
                 // Watchdog task
                 Task.Run(() =>
@@ -2774,10 +2846,7 @@ namespace WiFiAudioConnector
             _isReloading = true;
             try
             {
-                if (_volumeOsd != null)
-                {
-                    _volumeOsd.ShowHint("参数热重载", noticeTag != null ? (noticeTag + "\n正在平滑热重载音频流...") : "正在平滑热重载音频流...");
-                }
+                ShowNotification("参数热重载", noticeTag != null ? (noticeTag + "\n正在平滑热重载音频流...") : "正在平滑热重载音频流...");
 
                 _notifyIcon.Text = "WiFi 音频连接器 (正在平滑切换参数...)";
 
@@ -2828,9 +2897,8 @@ namespace WiFiAudioConnector
                 _notifyIcon.Text = "WiFi 音频连接器 (未连接)";
                 _flyout.UpdateState(ConnectionState.Disconnected);
                 _flyout.UpdateBatteryUI(null);
-                ShowNotification("蓝牙音频已断开", string.Format("{0} [蓝牙]\n音频直通已关闭", devName), ToolTipIcon.Info);
+                ShowNotification("已断开连接", string.Format("{0} [蓝牙]\n音频直通已关闭", devName), ToolTipIcon.Info);
                 if (_flyout != null) _flyout.SyncCurrentDeviceToUI();
-                if (_volumeOsd != null) _volumeOsd.ShowHint("已断开连接", "蓝牙音频直通已关闭");
                 return;
             }
 
@@ -2858,10 +2926,7 @@ namespace WiFiAudioConnector
             UpdateTrayIcon(false);
             _notifyIcon.Text = "WiFi 音频连接器 (未连接)";
             _flyout.UpdateState(ConnectionState.Disconnected);
-            if (_volumeOsd != null)
-            {
-                _volumeOsd.ShowHint("已断开连接", "音频传输已停止");
-            }
+            ShowNotification("已断开连接", "音频传输已停止");
         }
 
         public void ToggleFlyout()
@@ -3028,15 +3093,33 @@ namespace WiFiAudioConnector
             }
         }
 
+        public void SetNotificationMode(string mode)
+        {
+            if (mode != "osd" && mode != "windows" && mode != "none") mode = "osd";
+            _settings.NotificationMode = mode;
+            _settings.Save();
+            SyncNotificationState();
+
+            if (mode == "osd")
+            {
+                if (_volumeOsd != null) _volumeOsd.ShowHint("提示通知模式", "已切换为: 桌面 OSD 悬浮胶囊");
+            }
+            else if (mode == "windows")
+            {
+                if (_notifyIcon != null) _notifyIcon.ShowBalloonTip(2000, "提示通知模式", "已切换为: Windows 系统气泡通知", ToolTipIcon.Info);
+            }
+        }
+
         public void SyncNotificationState()
         {
-            if (_notifyMenuItem != null)
-            {
-                _notifyMenuItem.Checked = _settings.ShowNotifications;
-            }
+            string mode = _settings.NotificationMode;
+            if (_notifyMenuOsd != null) _notifyMenuOsd.Checked = (mode == "osd");
+            if (_notifyMenuWin != null) _notifyMenuWin.Checked = (mode == "windows");
+            if (_notifyMenuNone != null) _notifyMenuNone.Checked = (mode == "none");
+
             if (_flyout != null)
             {
-                _flyout.SyncNotificationCheckbox();
+                _flyout.UpdateNotificationSegmentUI(mode);
             }
         }
 
@@ -3047,10 +3130,21 @@ namespace WiFiAudioConnector
 
         public void ShowNotification(string title, string msg, ToolTipIcon icon)
         {
-            if (!_settings.ShowNotifications) return;
-            if (_notifyIcon != null)
+            if (_settings.NotificationMode == "none") return;
+
+            if (_settings.NotificationMode == "osd")
             {
-                _notifyIcon.ShowBalloonTip(2000, title, msg, icon);
+                if (_volumeOsd != null)
+                {
+                    _volumeOsd.ShowHint(title, msg);
+                }
+            }
+            else if (_settings.NotificationMode == "windows")
+            {
+                if (_notifyIcon != null)
+                {
+                    _notifyIcon.ShowBalloonTip(2000, title, msg, icon);
+                }
             }
         }
 
@@ -3617,7 +3711,9 @@ namespace WiFiAudioConnector
         private RadioButton _rbLatencySmooth;
         private CheckBox _cbMutePhone;
         private CheckBox _cbAutoConnect;
-        private CheckBox _cbNotifications;
+        private Button _btnNotifyOsd;
+        private Button _btnNotifyWin;
+        private Button _btnNotifyNone;
         private Slider _sliderVolume;
         private TextBlock _txtVolumePercent;
         private Button _btnMute;
@@ -3651,7 +3747,7 @@ namespace WiFiAudioConnector
         private void BuildUI()
         {
             Width = 370;
-            Height = 765;
+            Height = 785;
             WindowStyle = WindowStyle.None;
             AllowsTransparency = true;
             Background = System.Windows.Media.Brushes.Transparent;
@@ -3736,14 +3832,6 @@ namespace WiFiAudioConnector
             var devicePanel = new StackPanel();
 
             var row1 = new DockPanel { Margin = new Thickness(0, 0, 0, 8) };
-            var devTitle = new TextBlock
-            {
-                Text = "选择音频推流设备",
-                FontSize = 13,
-                FontWeight = FontWeights.SemiBold,
-                Foreground = System.Windows.Media.Brushes.White,
-                VerticalAlignment = VerticalAlignment.Center
-            };
             _statusBadge = new Border
             {
                 CornerRadius = new CornerRadius(4),
@@ -3765,7 +3853,7 @@ namespace WiFiAudioConnector
                 CornerRadius = new CornerRadius(4),
                 Padding = new Thickness(6, 2, 6, 2),
                 Background = new SolidColorBrush(Color.FromArgb(140, 20, 130, 75)),
-                HorizontalAlignment = HorizontalAlignment.Right,
+                HorizontalAlignment = HorizontalAlignment.Left,
                 Margin = new Thickness(0, 0, 6, 0),
                 Visibility = Visibility.Collapsed
             };
@@ -3777,11 +3865,10 @@ namespace WiFiAudioConnector
                 Foreground = System.Windows.Media.Brushes.White
             };
             _batteryBadge.Child = _batteryText;
-            DockPanel.SetDock(_batteryBadge, Dock.Right);
+            DockPanel.SetDock(_batteryBadge, Dock.Left);
 
             row1.Children.Add(_statusBadge);
             row1.Children.Add(_batteryBadge);
-            row1.Children.Add(devTitle);
             devicePanel.Children.Add(row1);
 
             // Device Dropdown + Scan Button Row
@@ -4335,26 +4422,40 @@ namespace WiFiAudioConnector
             _cbAutoConnect.Unchecked += (s, e) => { _app.CurrentSettings.AutoConnect = false; _app.CurrentSettings.Save(); };
             optsPanel.Children.Add(_cbAutoConnect);
 
-            _cbNotifications = new CheckBox
+            // 提示通知模式 (连体开关: 桌面 OSD / Windows / 关闭)
+            var notifyHeader = new DockPanel { Margin = new Thickness(0, 2, 0, 4) };
+            var tbNotifyTitle = new TextBlock
             {
-                Content = "显示连接与断开桌面提示通知",
-                Foreground = System.Windows.Media.Brushes.White,
+                Text = "提示通知方式:",
                 FontSize = 11,
-                IsChecked = _app.CurrentSettings.ShowNotifications
+                Foreground = new SolidColorBrush(Color.FromArgb(210, 220, 225, 235)),
+                VerticalAlignment = VerticalAlignment.Center
             };
-            _cbNotifications.Checked += (s, e) =>
+            notifyHeader.Children.Add(tbNotifyTitle);
+            optsPanel.Children.Add(notifyHeader);
+
+            var segBorder = new Border
             {
-                _app.CurrentSettings.ShowNotifications = true;
-                _app.CurrentSettings.Save();
-                _app.SyncNotificationState();
+                Background = new SolidColorBrush(Color.FromArgb(170, 25, 28, 36)),
+                BorderBrush = new SolidColorBrush(Color.FromArgb(60, 255, 255, 255)),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(6),
+                Padding = new Thickness(2),
+                Margin = new Thickness(0, 0, 0, 6)
             };
-            _cbNotifications.Unchecked += (s, e) =>
-            {
-                _app.CurrentSettings.ShowNotifications = false;
-                _app.CurrentSettings.Save();
-                _app.SyncNotificationState();
-            };
-            optsPanel.Children.Add(_cbNotifications);
+
+            var segGrid = new System.Windows.Controls.Primitives.UniformGrid { Rows = 1, Columns = 3 };
+            _btnNotifyOsd = CreateNotifySegmentButton("桌面 OSD", "osd");
+            _btnNotifyWin = CreateNotifySegmentButton("Windows", "windows");
+            _btnNotifyNone = CreateNotifySegmentButton("关闭", "none");
+
+            segGrid.Children.Add(_btnNotifyOsd);
+            segGrid.Children.Add(_btnNotifyWin);
+            segGrid.Children.Add(_btnNotifyNone);
+            segBorder.Child = segGrid;
+            optsPanel.Children.Add(segBorder);
+
+            UpdateNotificationSegmentUI(_app.CurrentSettings.NotificationMode);
 
             // Hotkey row
             var hotkeyRow = new DockPanel { Margin = new Thickness(0, 8, 0, 0) };
@@ -4792,17 +4893,53 @@ namespace WiFiAudioConnector
             return "专属快捷键: 点击设置";
         }
 
-        public void SyncNotificationCheckbox()
+        private Button CreateNotifySegmentButton(string text, string mode)
+        {
+            var btn = new Button
+            {
+                Content = text,
+                FontSize = 11,
+                FontFamily = new FontFamily("Microsoft YaHei UI, Segoe UI"),
+                BorderThickness = new Thickness(0),
+                Background = System.Windows.Media.Brushes.Transparent,
+                Foreground = new SolidColorBrush(Color.FromArgb(180, 160, 170, 190)),
+                Cursor = System.Windows.Input.Cursors.Hand,
+                Height = 22
+            };
+            btn.Click += (s, e) => _app.SetNotificationMode(mode);
+            return btn;
+        }
+
+        public void UpdateNotificationSegmentUI(string mode)
         {
             Action act = () =>
             {
-                if (_cbNotifications != null && _cbNotifications.IsChecked != _app.CurrentSettings.ShowNotifications)
-                {
-                    _cbNotifications.IsChecked = _app.CurrentSettings.ShowNotifications;
-                }
+                if (_btnNotifyOsd == null || _btnNotifyWin == null || _btnNotifyNone == null) return;
+
+                var activeBg = new SolidColorBrush(Color.FromArgb(240, 20, 120, 240));
+                var activeFg = System.Windows.Media.Brushes.White;
+                var inactiveBg = System.Windows.Media.Brushes.Transparent;
+                var inactiveFg = new SolidColorBrush(Color.FromArgb(180, 160, 170, 190));
+
+                _btnNotifyOsd.Background = (mode == "osd") ? activeBg : inactiveBg;
+                _btnNotifyOsd.Foreground = (mode == "osd") ? activeFg : inactiveFg;
+                _btnNotifyOsd.FontWeight = (mode == "osd") ? FontWeights.Bold : FontWeights.Normal;
+
+                _btnNotifyWin.Background = (mode == "windows") ? activeBg : inactiveBg;
+                _btnNotifyWin.Foreground = (mode == "windows") ? activeFg : inactiveFg;
+                _btnNotifyWin.FontWeight = (mode == "windows") ? FontWeights.Bold : FontWeights.Normal;
+
+                _btnNotifyNone.Background = (mode == "none") ? activeBg : inactiveBg;
+                _btnNotifyNone.Foreground = (mode == "none") ? activeFg : inactiveFg;
+                _btnNotifyNone.FontWeight = (mode == "none") ? FontWeights.Bold : FontWeights.Normal;
             };
             if (CheckAccess()) act();
             else Dispatcher.BeginInvoke(act);
+        }
+
+        public void SyncNotificationCheckbox()
+        {
+            UpdateNotificationSegmentUI(_app.CurrentSettings.NotificationMode);
         }
 
         public void UpdateVolumeUI(int volumePercent, bool isMuted)
