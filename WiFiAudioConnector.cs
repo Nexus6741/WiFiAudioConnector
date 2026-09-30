@@ -89,6 +89,190 @@ namespace WiFiAudioConnector
         }
     }
 
+    #region Windows Core Audio Session COM Interop
+    [ComImport]
+    [Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
+    internal class MMDeviceEnumeratorComObject { }
+
+    internal enum EDataFlow { eRender, eCapture, eAll }
+    internal enum ERole { eConsole, eMultimedia, eCommunications }
+
+    [Guid("A95664D2-9614-4F35-A746-DE8DB63617E6"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IMMDeviceEnumerator
+    {
+        int NotImpl1();
+        [PreserveSig]
+        int GetDefaultAudioEndpoint(EDataFlow dataFlow, ERole role, out IMMDevice ppDevice);
+    }
+
+    [Guid("D666063F-1587-4E43-81F1-B948E807363F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IMMDevice
+    {
+        [PreserveSig]
+        int Activate(ref Guid iid, int dwClsCtx, IntPtr pActivationParams, [MarshalAs(UnmanagedType.IUnknown)] out object ppInterface);
+    }
+
+    [Guid("77AA99A0-1BD6-484F-8BC7-2C654C9A9B6F"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IAudioSessionManager2
+    {
+        int NotImpl1();
+        int NotImpl2();
+        [PreserveSig]
+        int GetSessionEnumerator(out IAudioSessionEnumerator SessionEnum);
+    }
+
+    [Guid("E2F5BB11-0570-40CA-ACDD-3AA01277DEE8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IAudioSessionEnumerator
+    {
+        [PreserveSig]
+        int GetCount(out int SessionCount);
+        [PreserveSig]
+        int GetSession(int SessionIndex, out IAudioSessionControl Session);
+    }
+
+    [Guid("F4B1A599-7266-4319-A8CA-E70ACB11E8CD"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IAudioSessionControl
+    {
+        [PreserveSig] int GetState(out int pRetVal);
+        [PreserveSig] int GetDisplayName([MarshalAs(UnmanagedType.LPWStr)] out string pRetVal);
+        [PreserveSig] int SetDisplayName([MarshalAs(UnmanagedType.LPWStr)] string Value, ref Guid EventContext);
+        [PreserveSig] int GetIconPath([MarshalAs(UnmanagedType.LPWStr)] out string pRetVal);
+        [PreserveSig] int SetIconPath([MarshalAs(UnmanagedType.LPWStr)] string Value, ref Guid EventContext);
+        [PreserveSig] int GetGroupingParam(out Guid pRetVal);
+        [PreserveSig] int SetGroupingParam(ref Guid Override, ref Guid EventContext);
+        [PreserveSig] int RegisterAudioSessionNotification(IntPtr NewNotifications);
+        [PreserveSig] int UnregisterAudioSessionNotification(IntPtr NewNotifications);
+    }
+
+    [Guid("bfb7ff88-7239-4fc9-8fa2-07c950be9c6d"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface IAudioSessionControl2
+    {
+        [PreserveSig] int GetState(out int pRetVal);
+        [PreserveSig] int GetDisplayName([MarshalAs(UnmanagedType.LPWStr)] out string pRetVal);
+        [PreserveSig] int SetDisplayName([MarshalAs(UnmanagedType.LPWStr)] string Value, ref Guid EventContext);
+        [PreserveSig] int GetIconPath([MarshalAs(UnmanagedType.LPWStr)] out string pRetVal);
+        [PreserveSig] int SetIconPath([MarshalAs(UnmanagedType.LPWStr)] string Value, ref Guid EventContext);
+        [PreserveSig] int GetGroupingParam(out Guid pRetVal);
+        [PreserveSig] int SetGroupingParam(ref Guid Override, ref Guid EventContext);
+        [PreserveSig] int RegisterAudioSessionNotification(IntPtr NewNotifications);
+        [PreserveSig] int UnregisterAudioSessionNotification(IntPtr NewNotifications);
+        [PreserveSig] int GetSessionIdentifier([MarshalAs(UnmanagedType.LPWStr)] out string pRetVal);
+        [PreserveSig] int GetSessionInstanceIdentifier([MarshalAs(UnmanagedType.LPWStr)] out string pRetVal);
+        [PreserveSig] int GetProcessId(out uint pRetVal);
+        [PreserveSig] int IsSystemSoundsSession();
+        [PreserveSig] int SetDuckingPreference(bool optOut);
+    }
+
+    [Guid("87CE5498-68D6-44E5-9215-6DA47EF883D8"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface ISimpleAudioVolume
+    {
+        [PreserveSig] int SetMasterVolume(float fLevel, ref Guid EventContext);
+        [PreserveSig] int GetMasterVolume(out float pfLevel);
+        [PreserveSig] int SetMute(bool bMute, ref Guid EventContext);
+        [PreserveSig] int GetMute(out bool pbMute);
+    }
+
+    public static class WindowsAudioSessionController
+    {
+        public static bool SetProcessVolume(int pid, float volume, bool? mute = null)
+        {
+            if (pid <= 0) return false;
+            try
+            {
+                var enumerator = (IMMDeviceEnumerator)new MMDeviceEnumeratorComObject();
+                IMMDevice dev;
+                if (enumerator.GetDefaultAudioEndpoint(EDataFlow.eRender, ERole.eMultimedia, out dev) != 0 || dev == null)
+                    return false;
+
+                Guid iidManager = typeof(IAudioSessionManager2).GUID;
+                object oMgr;
+                if (dev.Activate(ref iidManager, 23, IntPtr.Zero, out oMgr) != 0 || oMgr == null)
+                    return false;
+
+                var mgr = (IAudioSessionManager2)oMgr;
+                IAudioSessionEnumerator sessionEnum;
+                if (mgr.GetSessionEnumerator(out sessionEnum) != 0 || sessionEnum == null)
+                    return false;
+
+                int count;
+                sessionEnum.GetCount(out count);
+                for (int i = 0; i < count; i++)
+                {
+                    IAudioSessionControl ctl;
+                    sessionEnum.GetSession(i, out ctl);
+                    var ctl2 = ctl as IAudioSessionControl2;
+                    var vol = ctl as ISimpleAudioVolume;
+                    if (ctl2 != null && vol != null)
+                    {
+                        uint pId;
+                        ctl2.GetProcessId(out pId);
+                        if (pId == (uint)pid)
+                        {
+                            Guid empty = Guid.Empty;
+                            float clamped = Math.Max(0.0f, Math.Min(1.0f, volume));
+                            vol.SetMasterVolume(clamped, ref empty);
+                            if (mute.HasValue)
+                            {
+                                vol.SetMute(mute.Value, ref empty);
+                            }
+                            return true;
+                        }
+                    }
+                }
+            }
+            catch { }
+            return false;
+        }
+
+        public static bool GetProcessVolume(int pid, out float volume, out bool mute)
+        {
+            volume = 1.0f;
+            mute = false;
+            if (pid <= 0) return false;
+            try
+            {
+                var enumerator = (IMMDeviceEnumerator)new MMDeviceEnumeratorComObject();
+                IMMDevice dev;
+                if (enumerator.GetDefaultAudioEndpoint(EDataFlow.eRender, ERole.eMultimedia, out dev) != 0 || dev == null)
+                    return false;
+
+                Guid iidManager = typeof(IAudioSessionManager2).GUID;
+                object oMgr;
+                if (dev.Activate(ref iidManager, 23, IntPtr.Zero, out oMgr) != 0 || oMgr == null)
+                    return false;
+
+                var mgr = (IAudioSessionManager2)oMgr;
+                IAudioSessionEnumerator sessionEnum;
+                if (mgr.GetSessionEnumerator(out sessionEnum) != 0 || sessionEnum == null)
+                    return false;
+
+                int count;
+                sessionEnum.GetCount(out count);
+                for (int i = 0; i < count; i++)
+                {
+                    IAudioSessionControl ctl;
+                    sessionEnum.GetSession(i, out ctl);
+                    var ctl2 = ctl as IAudioSessionControl2;
+                    var vol = ctl as ISimpleAudioVolume;
+                    if (ctl2 != null && vol != null)
+                    {
+                        uint pId;
+                        ctl2.GetProcessId(out pId);
+                        if (pId == (uint)pid)
+                        {
+                            vol.GetMasterVolume(out volume);
+                            vol.GetMute(out mute);
+                            return true;
+                        }
+                    }
+                }
+            }
+            catch { }
+            return false;
+        }
+    }
+    #endregion
+
     public class Settings
     {
         public string DeviceName = "Xiaomi 15 Pro";
@@ -99,6 +283,9 @@ namespace WiFiAudioConnector
         public bool MutePhone = true;
         public bool AutoConnect = true;
         public bool ShowNotifications = true;
+        public int MasterVolume = 100;
+        public bool IsMuted = false;
+        public bool SyncPhoneVolume = true;
         public bool HotkeyEnabled = true;
         public ModifierKeys HotkeyModifiers = ModifierKeys.Control | ModifierKeys.Alt;
         public Key HotkeyKey = Key.W;
@@ -124,6 +311,9 @@ namespace WiFiAudioConnector
                 sb.AppendLine("MutePhone=" + (MutePhone ? "1" : "0"));
                 sb.AppendLine("AutoConnect=" + (AutoConnect ? "1" : "0"));
                 sb.AppendLine("ShowNotifications=" + (ShowNotifications ? "1" : "0"));
+                sb.AppendLine("MasterVolume=" + MasterVolume);
+                sb.AppendLine("IsMuted=" + (IsMuted ? "1" : "0"));
+                sb.AppendLine("SyncPhoneVolume=" + (SyncPhoneVolume ? "1" : "0"));
                 sb.AppendLine("HotkeyEnabled=" + (HotkeyEnabled ? "1" : "0"));
                 sb.AppendLine("HotkeyModifiers=" + (int)HotkeyModifiers);
                 sb.AppendLine("HotkeyKey=" + (int)HotkeyKey);
@@ -169,6 +359,9 @@ namespace WiFiAudioConnector
                             else if (k == "MutePhone") s.MutePhone = (v == "1");
                             else if (k == "AutoConnect") s.AutoConnect = (v == "1");
                             else if (k == "ShowNotifications") s.ShowNotifications = (v != "0");
+                            else if (k == "MasterVolume") { int vInt; if (int.TryParse(v, out vInt)) s.MasterVolume = Math.Max(0, Math.Min(100, vInt)); }
+                            else if (k == "IsMuted") s.IsMuted = (v == "1");
+                            else if (k == "SyncPhoneVolume") s.SyncPhoneVolume = (v != "0");
                             else if (k == "HotkeyEnabled") s.HotkeyEnabled = (v == "1");
                             else if (k == "HotkeyModifiers") { int m; if (int.TryParse(v, out m)) s.HotkeyModifiers = (ModifierKeys)m; }
                             else if (k == "HotkeyKey") { int kCode; if (int.TryParse(v, out kCode)) s.HotkeyKey = (Key)kCode; }
@@ -922,6 +1115,9 @@ namespace WiFiAudioConnector
         private HotkeyManager _hotkeyManager = null;
         private HotkeyConfigWindow _hotkeyWin = null;
         private ToolStripMenuItem _notifyMenuItem = null;
+        private Process _logcatProc = null;
+        private int _phoneMaxVolume = 150;
+        private DateTime _lastSliderSetTime = DateTime.MinValue;
 
         public static void LogLine(string s)
         {
@@ -1365,21 +1561,7 @@ namespace WiFiAudioConnector
                         }
                     }
 
-                    // 2. ensure media volume is set
-                    var psiVol = new ProcessStartInfo
-                    {
-                        FileName = adbPath,
-                        Arguments = string.Format("-s {0} shell cmd media_session volume --show --stream 3 --set 15", target),
-                        CreateNoWindow = true,
-                        UseShellExecute = false,
-                        WindowStyle = ProcessWindowStyle.Hidden
-                    };
-                    using (var p = Process.Start(psiVol))
-                    {
-                        p.WaitForExit(2500);
-                    }
-
-                    // 3. build scrcpy arguments
+                    // 2. build scrcpy arguments
                     string codecArg = "--audio-codec=raw";
                     if (_settings.Codec == "opus320") codecArg = "--audio-codec=opus --audio-bit-rate=320K";
                     else if (_settings.Codec == "opus128") codecArg = "--audio-codec=opus --audio-bit-rate=128K";
@@ -1419,6 +1601,7 @@ namespace WiFiAudioConnector
                 _notifyIcon.Text = string.Format("WiFi 音频连接器 - {0} [{1}] (已连接)", _settings.DeviceName, modeTag);
                 ShowNotification("设备已连接", string.Format("{0} [{1}]\n音频流已就绪 ({2})，直通电脑播放", _settings.DeviceName, modeTag, desc), ToolTipIcon.Info);
                 _flyout.UpdateState(ConnectionState.Connected);
+                StartPhoneVolumeSync(target, _scrcpyProc.Id);
 
                 // Watchdog task
                 Task.Run(() =>
@@ -1429,6 +1612,7 @@ namespace WiFiAudioConnector
                     }
                     catch { }
 
+                    StopPhoneVolumeSync();
                     _currentActiveTarget = null;
                     Dispatcher.BeginInvoke(new Action(() =>
                     {
@@ -1450,6 +1634,7 @@ namespace WiFiAudioConnector
 
         public void Disconnect()
         {
+            StopPhoneVolumeSync();
             try
             {
                 if (_scrcpyProc != null && !_scrcpyProc.HasExited)
@@ -1639,6 +1824,200 @@ namespace WiFiAudioConnector
             }
         }
 
+        public void StartPhoneVolumeSync(string target, int scrcpyPid)
+        {
+            StopPhoneVolumeSync();
+
+            Task.Run(() =>
+            {
+                try
+                {
+                    string adbPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "adb.exe");
+
+                    // 1. Query initial volume & max range
+                    var psiGet = new ProcessStartInfo
+                    {
+                        FileName = adbPath,
+                        Arguments = string.Format("-s {0} shell cmd media_session volume --stream 3 --get", target),
+                        CreateNoWindow = true,
+                        UseShellExecute = false,
+                        RedirectStandardOutput = true
+                    };
+                    using (var p = Process.Start(psiGet))
+                    {
+                        string outStr = p.StandardOutput.ReadToEnd();
+                        p.WaitForExit(2000);
+                        var m = Regex.Match(outStr, @"volume is (\d+) in range \[(\d+)\.\.(\d+)\]");
+                        if (m.Success)
+                        {
+                            int cur = int.Parse(m.Groups[1].Value);
+                            int max = int.Parse(m.Groups[3].Value);
+                            if (max > 0) _phoneMaxVolume = max;
+                            if (_settings.SyncPhoneVolume)
+                            {
+                                int pct = (int)Math.Round((float)cur * 100 / _phoneMaxVolume);
+                                _settings.MasterVolume = Math.Max(0, Math.Min(100, pct));
+                            }
+                            Dispatcher.BeginInvoke(new Action(() =>
+                            {
+                                if (_flyout != null) _flyout.UpdateVolumeUI(_settings.MasterVolume, _settings.IsMuted);
+                            }));
+                        }
+                    }
+
+                    // Apply to scrcpy session
+                    float initialRatio = _settings.MasterVolume / 100.0f;
+                    for (int i = 0; i < 6; i++)
+                    {
+                        if (WindowsAudioSessionController.SetProcessVolume(scrcpyPid, initialRatio, _settings.IsMuted))
+                            break;
+                        Thread.Sleep(300);
+                    }
+
+                    // 2. Start streaming logcat for real-time volume key events
+                    var psiLogcat = new ProcessStartInfo
+                    {
+                        FileName = adbPath,
+                        Arguments = string.Format("-s {0} shell logcat -v raw -s vol.Events:I VolumeSliderController:D", target),
+                        CreateNoWindow = true,
+                        UseShellExecute = false,
+                        RedirectStandardOutput = true
+                    };
+                    _logcatProc = Process.Start(psiLogcat);
+
+                    // Companion polling task for non-key volume changes
+                    Task.Run(() =>
+                    {
+                        while (_logcatProc != null && !_logcatProc.HasExited)
+                        {
+                            Thread.Sleep(1500);
+                            if (!_settings.SyncPhoneVolume) continue;
+                            if ((DateTime.Now - _lastSliderSetTime).TotalMilliseconds < 1500) continue;
+
+                            try
+                            {
+                                var psiPoll = new ProcessStartInfo
+                                {
+                                    FileName = adbPath,
+                                    Arguments = string.Format("-s {0} shell cmd media_session volume --stream 3 --get", target),
+                                    CreateNoWindow = true,
+                                    UseShellExecute = false,
+                                    RedirectStandardOutput = true
+                                };
+                                using (var p = Process.Start(psiPoll))
+                                {
+                                    string outStr = p.StandardOutput.ReadToEnd();
+                                    p.WaitForExit(1000);
+                                    var m = Regex.Match(outStr, @"volume is (\d+) in range \[(\d+)\.\.(\d+)\]");
+                                    if (m.Success)
+                                    {
+                                        int cur = int.Parse(m.Groups[1].Value);
+                                        int pct = (int)Math.Round((float)cur * 100 / _phoneMaxVolume);
+                                        pct = Math.Max(0, Math.Min(100, pct));
+                                        if (Math.Abs(pct - _settings.MasterVolume) >= 2)
+                                        {
+                                            _settings.MasterVolume = pct;
+                                            if (_scrcpyProc != null && !_scrcpyProc.HasExited)
+                                            {
+                                                WindowsAudioSessionController.SetProcessVolume(_scrcpyProc.Id, pct / 100.0f, _settings.IsMuted);
+                                            }
+                                            Dispatcher.BeginInvoke(new Action(() =>
+                                            {
+                                                if (_flyout != null) _flyout.UpdateVolumeUI(pct, _settings.IsMuted);
+                                            }));
+                                        }
+                                    }
+                                }
+                            }
+                            catch { }
+                        }
+                    });
+
+                    string line;
+                    while (_logcatProc != null && !_logcatProc.HasExited && (line = _logcatProc.StandardOutput.ReadLine()) != null)
+                    {
+                        if (!_settings.SyncPhoneVolume) continue;
+                        if ((DateTime.Now - _lastSliderSetTime).TotalMilliseconds < 800) continue;
+
+                        if (line.Contains("STREAM_MUSIC"))
+                        {
+                            var m = Regex.Match(line, @"STREAM_MUSIC\s+(\d+)");
+                            if (m.Success)
+                            {
+                                int val = int.Parse(m.Groups[1].Value);
+                                int pct = (int)Math.Round((float)val * 100 / _phoneMaxVolume);
+                                pct = Math.Max(0, Math.Min(100, pct));
+
+                                _settings.MasterVolume = pct;
+                                if (_scrcpyProc != null && !_scrcpyProc.HasExited)
+                                {
+                                    WindowsAudioSessionController.SetProcessVolume(_scrcpyProc.Id, pct / 100.0f, _settings.IsMuted);
+                                }
+                                Dispatcher.BeginInvoke(new Action(() =>
+                                {
+                                    if (_flyout != null) _flyout.UpdateVolumeUI(pct, _settings.IsMuted);
+                                }));
+                            }
+                        }
+                    }
+                }
+                catch { }
+            });
+        }
+
+        public void StopPhoneVolumeSync()
+        {
+            try
+            {
+                if (_logcatProc != null && !_logcatProc.HasExited)
+                {
+                    _logcatProc.Kill();
+                }
+            }
+            catch { }
+            _logcatProc = null;
+        }
+
+        public void SetVolumeFromUI(int volumePercent, bool isMuted)
+        {
+            _settings.MasterVolume = volumePercent;
+            _settings.IsMuted = isMuted;
+            _settings.Save();
+            _lastSliderSetTime = DateTime.Now;
+
+            float ratio = volumePercent / 100.0f;
+            if (_scrcpyProc != null && !_scrcpyProc.HasExited)
+            {
+                WindowsAudioSessionController.SetProcessVolume(_scrcpyProc.Id, ratio, isMuted);
+            }
+
+            // Sync to phone in background
+            if (_settings.SyncPhoneVolume && IsConnected && !string.IsNullOrEmpty(_currentActiveTarget))
+            {
+                string target = _currentActiveTarget;
+                int targetIndex = (int)Math.Round(ratio * _phoneMaxVolume);
+                Task.Run(() =>
+                {
+                    try
+                    {
+                        string adbPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "adb.exe");
+                        var psi = new ProcessStartInfo
+                        {
+                            FileName = adbPath,
+                            Arguments = string.Format("-s {0} shell cmd media_session volume --stream 3 --set {1}", target, targetIndex),
+                            CreateNoWindow = true,
+                            UseShellExecute = false
+                        };
+                        using (var p = Process.Start(psi))
+                        {
+                            p.WaitForExit(1500);
+                        }
+                    }
+                    catch { }
+                });
+            }
+        }
+
         public void ExitApp()
         {
             Disconnect();
@@ -1678,6 +2057,11 @@ namespace WiFiAudioConnector
         private CheckBox _cbMutePhone;
         private CheckBox _cbAutoConnect;
         private CheckBox _cbNotifications;
+        private Slider _sliderVolume;
+        private TextBlock _txtVolumePercent;
+        private Button _btnMute;
+        private CheckBox _cbSyncPhoneVolume;
+        private bool _isUpdatingVolumeUI = false;
         private TextBox _tbIp;
         private TextBox _tbPort;
         private TextBlock _txtHotkeyDisplay;
@@ -1699,7 +2083,7 @@ namespace WiFiAudioConnector
         private void BuildUI()
         {
             Width = 370;
-            Height = 580;
+            Height = 675;
             WindowStyle = WindowStyle.None;
             AllowsTransparency = true;
             Background = System.Windows.Media.Brushes.Transparent;
@@ -1962,6 +2346,101 @@ namespace WiFiAudioConnector
 
             deviceCard.Child = devicePanel;
             root.Children.Add(deviceCard);
+
+            // Volume Control Card
+            var volumeCard = new Border
+            {
+                Background = new SolidColorBrush(Color.FromArgb(160, 42, 45, 54)),
+                CornerRadius = new CornerRadius(8),
+                Padding = new Thickness(12),
+                Margin = new Thickness(0, 0, 0, 10)
+            };
+            var volumePanel = new StackPanel();
+
+            var volHeader = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
+            var lblVolTitle = new TextBlock
+            {
+                Text = "音频输出音量",
+                FontSize = 12,
+                FontWeight = FontWeights.Bold,
+                Foreground = System.Windows.Media.Brushes.White,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            DockPanel.SetDock(lblVolTitle, Dock.Left);
+            volHeader.Children.Add(lblVolTitle);
+
+            _txtVolumePercent = new TextBlock
+            {
+                Text = _app.CurrentSettings.IsMuted ? "静音" : (_app.CurrentSettings.MasterVolume + "%"),
+                FontSize = 12,
+                FontWeight = FontWeights.Bold,
+                Foreground = new SolidColorBrush(Color.FromRgb(20, 150, 255)),
+                HorizontalAlignment = HorizontalAlignment.Right,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            DockPanel.SetDock(_txtVolumePercent, Dock.Right);
+            volHeader.Children.Add(_txtVolumePercent);
+            volumePanel.Children.Add(volHeader);
+
+            var sliderRow = new DockPanel { Margin = new Thickness(0, 2, 0, 6) };
+            _btnMute = new Button
+            {
+                Content = _app.CurrentSettings.IsMuted ? "🔇" : "🔊",
+                FontSize = 13,
+                Width = 28,
+                Height = 26,
+                Background = System.Windows.Media.Brushes.Transparent,
+                Foreground = System.Windows.Media.Brushes.White,
+                BorderThickness = new Thickness(0),
+                Cursor = System.Windows.Input.Cursors.Hand,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 8, 0)
+            };
+            _btnMute.Click += (s, e) =>
+            {
+                bool newMute = !_app.CurrentSettings.IsMuted;
+                _btnMute.Content = newMute ? "🔇" : "🔊";
+                int val = (int)Math.Round(_sliderVolume.Value);
+                _txtVolumePercent.Text = newMute ? "静音" : (val + "%");
+                _app.SetVolumeFromUI(val, newMute);
+            };
+            DockPanel.SetDock(_btnMute, Dock.Left);
+            sliderRow.Children.Add(_btnMute);
+
+            _sliderVolume = new Slider
+            {
+                Minimum = 0,
+                Maximum = 100,
+                Value = _app.CurrentSettings.MasterVolume,
+                IsSnapToTickEnabled = true,
+                TickFrequency = 1,
+                VerticalAlignment = VerticalAlignment.Center,
+                Cursor = System.Windows.Input.Cursors.Hand
+            };
+            _sliderVolume.ValueChanged += (s, e) =>
+            {
+                if (_isUpdatingVolumeUI) return;
+                int val = (int)Math.Round(_sliderVolume.Value);
+                _txtVolumePercent.Text = _app.CurrentSettings.IsMuted ? "静音" : (val + "%");
+                _app.SetVolumeFromUI(val, _app.CurrentSettings.IsMuted);
+            };
+            sliderRow.Children.Add(_sliderVolume);
+            volumePanel.Children.Add(sliderRow);
+
+            _cbSyncPhoneVolume = new CheckBox
+            {
+                Content = "手机按键实时联动 (按手机物理音量键调节电脑声音)",
+                Foreground = System.Windows.Media.Brushes.White,
+                FontSize = 11,
+                Margin = new Thickness(0, 2, 0, 0),
+                IsChecked = _app.CurrentSettings.SyncPhoneVolume
+            };
+            _cbSyncPhoneVolume.Checked += (s, e) => { _app.CurrentSettings.SyncPhoneVolume = true; _app.CurrentSettings.Save(); };
+            _cbSyncPhoneVolume.Unchecked += (s, e) => { _app.CurrentSettings.SyncPhoneVolume = false; _app.CurrentSettings.Save(); };
+            volumePanel.Children.Add(_cbSyncPhoneVolume);
+
+            volumeCard.Child = volumePanel;
+            root.Children.Add(volumeCard);
 
             // Audio Quality Settings Card
             var qualityCard = new Border
@@ -2306,6 +2785,32 @@ namespace WiFiAudioConnector
                 if (_cbNotifications != null && _cbNotifications.IsChecked != _app.CurrentSettings.ShowNotifications)
                 {
                     _cbNotifications.IsChecked = _app.CurrentSettings.ShowNotifications;
+                }
+            };
+            if (CheckAccess()) act();
+            else Dispatcher.BeginInvoke(act);
+        }
+
+        public void UpdateVolumeUI(int volumePercent, bool isMuted)
+        {
+            Action act = () =>
+            {
+                _isUpdatingVolumeUI = true;
+                try
+                {
+                    if (_sliderVolume != null) _sliderVolume.Value = volumePercent;
+                    if (_txtVolumePercent != null)
+                    {
+                        _txtVolumePercent.Text = isMuted ? "静音" : (volumePercent + "%");
+                    }
+                    if (_btnMute != null)
+                    {
+                        _btnMute.Content = isMuted ? "🔇" : "🔊";
+                    }
+                }
+                finally
+                {
+                    _isUpdatingVolumeUI = false;
                 }
             };
             if (CheckAccess()) act();
