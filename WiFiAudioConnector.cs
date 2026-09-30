@@ -2653,14 +2653,28 @@ namespace WiFiAudioConnector
 
                 StopPhoneVolumeSync();
 
+                // 1. 断连前先静音手机媒体音量，彻底消除重连间隙可能发生的设备扬声器声音外露
+                if (!string.IsNullOrEmpty(target))
+                {
+                    await Task.Run(() => MutePhoneMediaQuick(target));
+                }
+
+                // 2. 终止当前 scrcpy 音频流进程
                 if (_scrcpyProc != null && !_scrcpyProc.HasExited)
                 {
-                    try { _scrcpyProc.Kill(); } catch { }
+                    try
+                    {
+                        _scrcpyProc.Kill();
+                        _scrcpyProc.WaitForExit(500);
+                    }
+                    catch { }
                 }
                 _scrcpyProc = null;
 
-                await Task.Delay(350);
+                // 3. 短暂平滑等待
+                await Task.Delay(250);
 
+                // 4. 重建连接并在连接就绪后自动恢复设备音量
                 _isReloading = false;
                 ConnectAsync(target);
             }
@@ -2913,36 +2927,34 @@ namespace WiFiAudioConnector
                             int cur = int.Parse(m.Groups[1].Value);
                             int max = int.Parse(m.Groups[3].Value);
                             if (max > 0) _phoneMaxVolume = max;
-
-                            // Always preserve and sync the last saved MasterVolume to phone
-                            if (_settings.SyncPhoneVolume)
-                            {
-                                int targetIndex = (int)Math.Round((_settings.MasterVolume / 100.0f) * _phoneMaxVolume);
-                                string cmdArgs;
-                                if (_settings.IsMuted)
-                                {
-                                    cmdArgs = string.Format("-s {0} shell \"cmd audio set-volume 3 0; cmd audio adj-mute 3; cmd media_session volume --stream 3 --set 0\"", target);
-                                }
-                                else
-                                {
-                                    cmdArgs = string.Format("-s {0} shell \"cmd audio adj-unmute 3; cmd audio set-volume 3 {1}; cmd media_session volume --stream 3 --set {1}\"", target, targetIndex);
-                                }
-                                var psiRestore = new ProcessStartInfo
-                                {
-                                    FileName = adbPath,
-                                    Arguments = cmdArgs,
-                                    CreateNoWindow = true,
-                                    UseShellExecute = false
-                                };
-                                using (var pRestore = Process.Start(psiRestore)) { pRestore.WaitForExit(1500); }
-                            }
-                            _lastSliderSetTime = DateTime.Now;
-                            Dispatcher.BeginInvoke(new Action(() =>
-                            {
-                                if (_flyout != null) _flyout.UpdateVolumeUI(_settings.MasterVolume, _settings.IsMuted);
-                            }));
                         }
                     }
+
+                    // Always restore and sync the last saved MasterVolume to phone
+                    int targetIndex = (int)Math.Round((_settings.MasterVolume / 100.0f) * _phoneMaxVolume);
+                    string cmdArgs;
+                    if (_settings.IsMuted)
+                    {
+                        cmdArgs = string.Format("-s {0} shell \"cmd audio set-volume 3 0; cmd audio adj-mute 3; cmd media_session volume --stream 3 --set 0\"", target);
+                    }
+                    else
+                    {
+                        cmdArgs = string.Format("-s {0} shell \"cmd audio adj-unmute 3; cmd audio set-volume 3 {1}; cmd media_session volume --stream 3 --set {1}\"", target, targetIndex);
+                    }
+                    var psiRestore = new ProcessStartInfo
+                    {
+                        FileName = adbPath,
+                        Arguments = cmdArgs,
+                        CreateNoWindow = true,
+                        UseShellExecute = false
+                    };
+                    using (var pRestore = Process.Start(psiRestore)) { pRestore.WaitForExit(1500); }
+
+                    _lastSliderSetTime = DateTime.Now;
+                    Dispatcher.BeginInvoke(new Action(() =>
+                    {
+                        if (_flyout != null) _flyout.UpdateVolumeUI(_settings.MasterVolume, _settings.IsMuted);
+                    }));
 
                     // Apply to scrcpy session
                     float initialRatio = _settings.MasterVolume / 100.0f;
@@ -3181,6 +3193,29 @@ namespace WiFiAudioConnector
                 using (var p = Process.Start(psi))
                 {
                     p.WaitForExit(1500);
+                }
+            }
+            catch { }
+        }
+
+        public void MutePhoneMediaQuick(string target)
+        {
+            if (string.IsNullOrEmpty(target)) return;
+            try
+            {
+                string adbPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "adb.exe");
+                // Mute and set volume to 0 without pausing media playback (for seamless hot-reloading)
+                string shellCmd = "cmd audio set-volume 3 0; cmd audio adj-mute 3; cmd media_session volume --stream 3 --set 0";
+                var psi = new ProcessStartInfo
+                {
+                    FileName = adbPath,
+                    Arguments = string.Format("-s {0} shell \"{1}\"", target, shellCmd),
+                    CreateNoWindow = true,
+                    UseShellExecute = false
+                };
+                using (var p = Process.Start(psi))
+                {
+                    p.WaitForExit(1000);
                 }
             }
             catch { }
