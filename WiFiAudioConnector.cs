@@ -286,6 +286,7 @@ namespace WiFiAudioConnector
         public int MasterVolume = 100;
         public bool IsMuted = false;
         public bool SyncPhoneVolume = true;
+        public bool MuteOnDisconnect = true;
         public bool HotkeyEnabled = true;
         public ModifierKeys HotkeyModifiers = ModifierKeys.Control | ModifierKeys.Alt;
         public Key HotkeyKey = Key.W;
@@ -314,6 +315,7 @@ namespace WiFiAudioConnector
                 sb.AppendLine("MasterVolume=" + MasterVolume);
                 sb.AppendLine("IsMuted=" + (IsMuted ? "1" : "0"));
                 sb.AppendLine("SyncPhoneVolume=" + (SyncPhoneVolume ? "1" : "0"));
+                sb.AppendLine("MuteOnDisconnect=" + (MuteOnDisconnect ? "1" : "0"));
                 sb.AppendLine("HotkeyEnabled=" + (HotkeyEnabled ? "1" : "0"));
                 sb.AppendLine("HotkeyModifiers=" + (int)HotkeyModifiers);
                 sb.AppendLine("HotkeyKey=" + (int)HotkeyKey);
@@ -362,6 +364,7 @@ namespace WiFiAudioConnector
                             else if (k == "MasterVolume") { int vInt; if (int.TryParse(v, out vInt)) s.MasterVolume = Math.Max(0, Math.Min(100, vInt)); }
                             else if (k == "IsMuted") s.IsMuted = (v == "1");
                             else if (k == "SyncPhoneVolume") s.SyncPhoneVolume = (v != "0");
+                            else if (k == "MuteOnDisconnect") s.MuteOnDisconnect = (v != "0");
                             else if (k == "HotkeyEnabled") s.HotkeyEnabled = (v == "1");
                             else if (k == "HotkeyModifiers") { int m; if (int.TryParse(v, out m)) s.HotkeyModifiers = (ModifierKeys)m; }
                             else if (k == "HotkeyKey") { int kCode; if (int.TryParse(v, out kCode)) s.HotkeyKey = (Key)kCode; }
@@ -1612,14 +1615,20 @@ namespace WiFiAudioConnector
                     }
                     catch { }
 
-                    StopPhoneVolumeSync();
+                    string targetToMute = _currentActiveTarget;
                     _currentActiveTarget = null;
+                    StopPhoneVolumeSync();
                     Dispatcher.BeginInvoke(new Action(() =>
                     {
                         UpdateTrayIcon(false);
                         _notifyIcon.Text = "WiFi 音频连接器 (未连接)";
                         _flyout.UpdateState(ConnectionState.Disconnected);
                     }));
+
+                    if (_settings.SyncPhoneVolume && _settings.MuteOnDisconnect && !string.IsNullOrEmpty(targetToMute))
+                    {
+                        MutePhoneMedia(targetToMute);
+                    }
                 });
             }
             else
@@ -1634,6 +1643,14 @@ namespace WiFiAudioConnector
 
         public void Disconnect()
         {
+            string targetToMute = _currentActiveTarget;
+            _currentActiveTarget = null;
+
+            if (_settings.SyncPhoneVolume && _settings.MuteOnDisconnect && !string.IsNullOrEmpty(targetToMute))
+            {
+                MutePhoneMedia(targetToMute);
+            }
+
             StopPhoneVolumeSync();
             try
             {
@@ -1644,7 +1661,6 @@ namespace WiFiAudioConnector
             }
             catch { }
             _scrcpyProc = null;
-            _currentActiveTarget = null;
             UpdateTrayIcon(false);
             _notifyIcon.Text = "WiFi 音频连接器 (未连接)";
             _flyout.UpdateState(ConnectionState.Disconnected);
@@ -1856,7 +1872,22 @@ namespace WiFiAudioConnector
                             if (_settings.SyncPhoneVolume)
                             {
                                 int pct = (int)Math.Round((float)cur * 100 / _phoneMaxVolume);
-                                _settings.MasterVolume = Math.Max(0, Math.Min(100, pct));
+                                if (pct == 0 && _settings.MasterVolume > 0)
+                                {
+                                    int targetIndex = (int)Math.Round((_settings.MasterVolume / 100.0f) * _phoneMaxVolume);
+                                    var psiRestore = new ProcessStartInfo
+                                    {
+                                        FileName = adbPath,
+                                        Arguments = string.Format("-s {0} shell \"cmd audio adj-unmute 3; cmd audio set-volume 3 {1}; cmd media_session volume --stream 3 --set {1}\"", target, targetIndex),
+                                        CreateNoWindow = true,
+                                        UseShellExecute = false
+                                    };
+                                    using (var pRestore = Process.Start(psiRestore)) { pRestore.WaitForExit(1500); }
+                                }
+                                else
+                                {
+                                    _settings.MasterVolume = Math.Max(0, Math.Min(100, pct));
+                                }
                             }
                             Dispatcher.BeginInvoke(new Action(() =>
                             {
@@ -2001,10 +2032,19 @@ namespace WiFiAudioConnector
                     try
                     {
                         string adbPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "adb.exe");
+                        string cmdArgs;
+                        if (isMuted)
+                        {
+                            cmdArgs = string.Format("-s {0} shell \"cmd audio set-volume 3 0; cmd audio adj-mute 3; cmd media_session volume --stream 3 --set 0\"", target);
+                        }
+                        else
+                        {
+                            cmdArgs = string.Format("-s {0} shell \"cmd audio adj-unmute 3; cmd audio set-volume 3 {1}; cmd media_session volume --stream 3 --set {1}\"", target, targetIndex);
+                        }
                         var psi = new ProcessStartInfo
                         {
                             FileName = adbPath,
-                            Arguments = string.Format("-s {0} shell cmd media_session volume --stream 3 --set {1}", target, targetIndex),
+                            Arguments = cmdArgs,
                             CreateNoWindow = true,
                             UseShellExecute = false
                         };
@@ -2016,6 +2056,31 @@ namespace WiFiAudioConnector
                     catch { }
                 });
             }
+        }
+
+        public void MutePhoneMedia(string target)
+        {
+            if (string.IsNullOrEmpty(target)) return;
+            try
+            {
+                string adbPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "adb.exe");
+                // 1. Direct AudioManager stream 3 volume 0 and mute
+                // 2. Fallback to cmd media_session
+                // 3. Dispatch media session pause and KEYCODE_MEDIA_PAUSE (127)
+                string shellCmd = "cmd audio set-volume 3 0; cmd audio adj-mute 3; cmd media_session volume --stream 3 --set 0; cmd media_session dispatch pause; input keyevent 127";
+                var psi = new ProcessStartInfo
+                {
+                    FileName = adbPath,
+                    Arguments = string.Format("-s {0} shell \"{1}\"", target, shellCmd),
+                    CreateNoWindow = true,
+                    UseShellExecute = false
+                };
+                using (var p = Process.Start(psi))
+                {
+                    p.WaitForExit(1500);
+                }
+            }
+            catch { }
         }
 
         public void ExitApp()
@@ -2061,6 +2126,7 @@ namespace WiFiAudioConnector
         private TextBlock _txtVolumePercent;
         private Button _btnMute;
         private CheckBox _cbSyncPhoneVolume;
+        private CheckBox _cbMuteOnDisconnect;
         private bool _isUpdatingVolumeUI = false;
         private TextBox _tbIp;
         private TextBox _tbPort;
@@ -2083,7 +2149,7 @@ namespace WiFiAudioConnector
         private void BuildUI()
         {
             Width = 370;
-            Height = 675;
+            Height = 705;
             WindowStyle = WindowStyle.None;
             AllowsTransparency = true;
             Background = System.Windows.Media.Brushes.Transparent;
@@ -2435,9 +2501,43 @@ namespace WiFiAudioConnector
                 Margin = new Thickness(0, 2, 0, 0),
                 IsChecked = _app.CurrentSettings.SyncPhoneVolume
             };
-            _cbSyncPhoneVolume.Checked += (s, e) => { _app.CurrentSettings.SyncPhoneVolume = true; _app.CurrentSettings.Save(); };
-            _cbSyncPhoneVolume.Unchecked += (s, e) => { _app.CurrentSettings.SyncPhoneVolume = false; _app.CurrentSettings.Save(); };
+
+            _cbMuteOnDisconnect = new CheckBox
+            {
+                Content = "└ 仅开启联动时生效：断开后手机自动静音 (防声音外放)",
+                Foreground = new SolidColorBrush(Color.FromArgb(220, 210, 220, 235)),
+                FontSize = 10.5,
+                Margin = new Thickness(14, 4, 0, 0),
+                IsChecked = _app.CurrentSettings.MuteOnDisconnect,
+                IsEnabled = _app.CurrentSettings.SyncPhoneVolume
+            };
+
+            _cbSyncPhoneVolume.Checked += (s, e) =>
+            {
+                _app.CurrentSettings.SyncPhoneVolume = true;
+                _app.CurrentSettings.Save();
+                if (_cbMuteOnDisconnect != null) _cbMuteOnDisconnect.IsEnabled = true;
+            };
+            _cbSyncPhoneVolume.Unchecked += (s, e) =>
+            {
+                _app.CurrentSettings.SyncPhoneVolume = false;
+                _app.CurrentSettings.Save();
+                if (_cbMuteOnDisconnect != null) _cbMuteOnDisconnect.IsEnabled = false;
+            };
+
+            _cbMuteOnDisconnect.Checked += (s, e) =>
+            {
+                _app.CurrentSettings.MuteOnDisconnect = true;
+                _app.CurrentSettings.Save();
+            };
+            _cbMuteOnDisconnect.Unchecked += (s, e) =>
+            {
+                _app.CurrentSettings.MuteOnDisconnect = false;
+                _app.CurrentSettings.Save();
+            };
+
             volumePanel.Children.Add(_cbSyncPhoneVolume);
+            volumePanel.Children.Add(_cbMuteOnDisconnect);
 
             volumeCard.Child = volumePanel;
             root.Children.Add(volumeCard);
