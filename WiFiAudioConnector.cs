@@ -4963,13 +4963,22 @@ namespace WiFiAudioConnector
 
         public void ToggleFlyout()
         {
-            if (_flyout != null)
+            if (_flyout == null) return;
+
+            if (_flyout.IsVisible)
             {
-                if (_flyout.IsVisible && !_flyout.IsHiding)
+                if (!_flyout.IsHiding)
                 {
                     _flyout.HideFlyout();
                 }
-                else
+                // If it is already _isHiding (e.g. triggered milliseconds ago by Deactivated
+                // when user clicked the tray icon), do NOT call ShowFlyout()!
+                // Let the hide animation complete smoothly.
+            }
+            else
+            {
+                // Only show if it's not visible and wasn't just closed by this same click
+                if ((DateTime.UtcNow - _flyout.LastHideTime).TotalMilliseconds > 350)
                 {
                     ShowFlyout();
                 }
@@ -6286,7 +6295,9 @@ namespace WiFiAudioConnector
         private TranslateTransform _windowTranslate;
         private bool _isHiding = false;
         private bool _isShowing = false;
+        private DateTime _lastHideTime = DateTime.MinValue;
         public bool IsHiding { get { return _isHiding; } }
+        public DateTime LastHideTime { get { return _lastHideTime; } }
         private CheckBox _cbMutePhone;
         private Button _btnTriAudio;
         private Button _btnTriMic;
@@ -6374,6 +6385,54 @@ namespace WiFiAudioConnector
             };
         }
 
+        private static ControlTemplate CreateCustomButtonTemplate(int cornerRadius = 5, string hoverBg = "#374151", string hoverBorder = "#60A5FA")
+        {
+            string xaml = string.Format(@"<ControlTemplate xmlns=""http://schemas.microsoft.com/winfx/2006/xaml/presentation"" xmlns:x=""http://schemas.microsoft.com/winfx/2006/xaml"" TargetType=""Button"">
+                <Border x:Name=""bd"" Background=""{{TemplateBinding Background}}"" BorderBrush=""{{TemplateBinding BorderBrush}}"" BorderThickness=""{{TemplateBinding BorderThickness}}"" CornerRadius=""{0}"" Padding=""{{TemplateBinding Padding}}"">
+                    <ContentPresenter HorizontalAlignment=""Center"" VerticalAlignment=""Center""/>
+                </Border>
+                <ControlTemplate.Triggers>
+                    <Trigger Property=""IsMouseOver"" Value=""True"">
+                        <Setter TargetName=""bd"" Property=""Background"" Value=""{1}""/>
+                        <Setter TargetName=""bd"" Property=""BorderBrush"" Value=""{2}""/>
+                    </Trigger>
+                    <Trigger Property=""IsPressed"" Value=""True"">
+                        <Setter TargetName=""bd"" Property=""Opacity"" Value=""0.75""/>
+                    </Trigger>
+                </ControlTemplate.Triggers>
+            </ControlTemplate>", cornerRadius, hoverBg, hoverBorder);
+            try
+            {
+                return (ControlTemplate)XamlReader.Parse(xaml);
+            }
+            catch { return null; }
+        }
+
+        private void SetButtonLoading(Button btn, bool isLoading)
+        {
+            if (btn == null) return;
+            if (isLoading)
+            {
+                btn.IsHitTestVisible = false;
+                var pulse = new DoubleAnimation
+                {
+                    From = 1.0,
+                    To = 0.62,
+                    Duration = TimeSpan.FromMilliseconds(450),
+                    AutoReverse = true,
+                    RepeatBehavior = RepeatBehavior.Forever,
+                    EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut }
+                };
+                btn.BeginAnimation(OpacityProperty, pulse);
+            }
+            else
+            {
+                btn.BeginAnimation(OpacityProperty, null);
+                btn.Opacity = 1.0;
+                btn.IsHitTestVisible = true;
+            }
+        }
+
         private Button CreateCapsuleButton(out System.Windows.Shapes.Path icon, out TextBlock title, out TextBlock status)
         {
             var btn = new Button
@@ -6386,16 +6445,17 @@ namespace WiFiAudioConnector
                 BorderThickness = new Thickness(1)
             };
 
-            string btnTemplateXaml = @"<ControlTemplate xmlns=""http://schemas.microsoft.com/winfx/2006/xaml/presentation"" TargetType=""Button"">
+            string btnTemplateXaml = @"<ControlTemplate xmlns=""http://schemas.microsoft.com/winfx/2006/xaml/presentation"" xmlns:x=""http://schemas.microsoft.com/winfx/2006/xaml"" TargetType=""Button"">
                 <Border x:Name=""bd"" Background=""{TemplateBinding Background}"" BorderBrush=""{TemplateBinding BorderBrush}"" BorderThickness=""{TemplateBinding BorderThickness}"" CornerRadius=""8"" Padding=""2,6,2,6"">
                     <ContentPresenter HorizontalAlignment=""Center"" VerticalAlignment=""Center""/>
                 </Border>
                 <ControlTemplate.Triggers>
                     <Trigger Property=""IsMouseOver"" Value=""True"">
-                        <Setter TargetName=""bd"" Property=""Opacity"" Value=""0.9""/>
+                        <Setter TargetName=""bd"" Property=""BorderBrush"" Value=""#60A5FA""/>
+                        <Setter TargetName=""bd"" Property=""Opacity"" Value=""0.92""/>
                     </Trigger>
-                    <Trigger Property=""IsEnabled"" Value=""False"">
-                        <Setter TargetName=""bd"" Property=""Opacity"" Value=""0.45""/>
+                    <Trigger Property=""IsPressed"" Value=""True"">
+                        <Setter TargetName=""bd"" Property=""Opacity"" Value=""0.8""/>
                     </Trigger>
                 </ControlTemplate.Triggers>
             </ControlTemplate>";
@@ -6612,6 +6672,7 @@ namespace WiFiAudioConnector
                 Cursor = System.Windows.Input.Cursors.Hand,
                 VerticalAlignment = VerticalAlignment.Center
             };
+            btnHeaderClose.Template = CreateCustomButtonTemplate(4, "#DC2626", "#EF4444");
             btnHeaderClose.Click += (s, e) => HideFlyout();
             DockPanel.SetDock(btnHeaderClose, Dock.Right);
 
@@ -6630,6 +6691,7 @@ namespace WiFiAudioConnector
                 VerticalAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(0, 0, 4, 0)
             };
+            btnHeaderSettings.Template = CreateCustomButtonTemplate(4, "#334155", "#64748B");
             btnHeaderSettings.Click += (s, e) => _app.ShowHotkeyConfigWindow();
             DockPanel.SetDock(btnHeaderSettings, Dock.Right);
 
@@ -6718,6 +6780,7 @@ namespace WiFiAudioConnector
                 HorizontalAlignment = HorizontalAlignment.Right,
                 Margin = new Thickness(6, 0, 0, 0)
             };
+            _btnScan.Template = CreateCustomButtonTemplate(5, "#475569", "#94A3B8");
             _btnScan.Click += (s, e) => TriggerScan();
             DockPanel.SetDock(_btnScan, Dock.Right);
 
@@ -6756,6 +6819,7 @@ namespace WiFiAudioConnector
                 Margin = new Thickness(0, 0, 0, 8),
                 Visibility = Visibility.Collapsed
             };
+            _btnSwitchUsb.Template = CreateCustomButtonTemplate(5, "#15803D", "#4ADE80");
             _btnSwitchUsb.Click += async (s, e) =>
             {
                 var sel = _cbDevices.SelectedItem as DeviceItem;
@@ -6865,10 +6929,18 @@ namespace WiFiAudioConnector
                 BorderThickness = new Thickness(0),
                 Cursor = System.Windows.Input.Cursors.Hand
             };
-            string btnConnXaml = @"<ControlTemplate xmlns=""http://schemas.microsoft.com/winfx/2006/xaml/presentation"" TargetType=""Button"">
+            string btnConnXaml = @"<ControlTemplate xmlns=""http://schemas.microsoft.com/winfx/2006/xaml/presentation"" xmlns:x=""http://schemas.microsoft.com/winfx/2006/xaml"" TargetType=""Button"">
                 <Border x:Name=""border"" Background=""{TemplateBinding Background}"" CornerRadius=""6"">
                     <ContentPresenter HorizontalAlignment=""Center"" VerticalAlignment=""Center""/>
                 </Border>
+                <ControlTemplate.Triggers>
+                    <Trigger Property=""IsMouseOver"" Value=""True"">
+                        <Setter TargetName=""border"" Property=""Opacity"" Value=""0.9""/>
+                    </Trigger>
+                    <Trigger Property=""IsPressed"" Value=""True"">
+                        <Setter TargetName=""border"" Property=""Opacity"" Value=""0.75""/>
+                    </Trigger>
+                </ControlTemplate.Triggers>
             </ControlTemplate>";
             try { _btnConnect.Template = (ControlTemplate)XamlReader.Parse(btnConnXaml); } catch { }
             _btnConnect.Click += async (s, e) =>
@@ -6876,14 +6948,14 @@ namespace WiFiAudioConnector
                 if (_isConnecting) return;
                 _isConnecting = true;
                 _isActionInProgress = true;
-                _btnConnect.IsEnabled = false;
+                SetButtonLoading(_btnConnect, true);
 
                 var sel = _cbDevices != null ? _cbDevices.SelectedItem as DeviceItem : null;
                 string target = (sel != null && !string.IsNullOrEmpty(sel.Target)) ? sel.Target : _app.CurrentSettings.Target;
                 string devName = (sel != null && !string.IsNullOrEmpty(sel.Name)) ? sel.Name : _app.CurrentSettings.DeviceName;
 
                 bool isConnected = _app.IsTargetConnected(target);
-                _btnConnect.Content = isConnected ? "断开中..." : "连接中...";
+                _btnConnect.Content = UIHelper.CreateIconText("\uE72C", isConnected ? "正在断开连接..." : "正在建立连接...", 12, 12);
                 _btnConnect.Background = new SolidColorBrush(Color.FromArgb(235, 217, 119, 6)); // Amber #D97706
 
                 try
@@ -6906,7 +6978,7 @@ namespace WiFiAudioConnector
                 {
                     _isConnecting = false;
                     _isActionInProgress = false;
-                    _btnConnect.IsEnabled = true;
+                    SetButtonLoading(_btnConnect, false);
                     UpdateUIState();
                     try
                     {
@@ -6937,11 +7009,12 @@ namespace WiFiAudioConnector
                 if (_isAudioToggling) return;
                 _isAudioToggling = true;
                 _isActionInProgress = true;
-                _btnTriAudio.IsEnabled = false;
+                SetButtonLoading(_btnTriAudio, true);
 
                 bool isAudioOn = _app.IsScrcpyConnected || _app.IsBluetoothConnected;
-                _statusTriAudio.Text = isAudioOn ? "● 关闭中..." : "● 开启中...";
+                _statusTriAudio.Text = isAudioOn ? "● 正在关闭..." : "● 正在开启...";
                 _btnTriAudio.Background = new SolidColorBrush(Color.FromArgb(235, 217, 119, 6)); // Amber #D97706
+                _btnTriAudio.BorderBrush = new SolidColorBrush(Color.FromArgb(200, 245, 158, 11));
                 _iconTriAudio.Fill = System.Windows.Media.Brushes.White;
                 _titleTriAudio.Foreground = System.Windows.Media.Brushes.White;
                 _statusTriAudio.Foreground = System.Windows.Media.Brushes.White;
@@ -6973,7 +7046,7 @@ namespace WiFiAudioConnector
                 {
                     _isAudioToggling = false;
                     _isActionInProgress = false;
-                    _btnTriAudio.IsEnabled = true;
+                    SetButtonLoading(_btnTriAudio, false);
                     UpdateTriButtonStates();
                     try
                     {
@@ -6995,11 +7068,12 @@ namespace WiFiAudioConnector
                 if (_isMicToggling) return;
                 _isMicToggling = true;
                 _isActionInProgress = true;
-                _btnTriMic.IsEnabled = false;
+                SetButtonLoading(_btnTriMic, true);
 
                 bool micOn = _app.IsMicRunning;
-                _statusTriMic.Text = micOn ? "● 关闭中..." : "● 开启中...";
+                _statusTriMic.Text = micOn ? "● 正在关闭..." : "● 正在开启...";
                 _btnTriMic.Background = new SolidColorBrush(Color.FromArgb(235, 217, 119, 6)); // Amber #D97706
+                _btnTriMic.BorderBrush = new SolidColorBrush(Color.FromArgb(200, 245, 158, 11));
                 _iconTriMic.Fill = System.Windows.Media.Brushes.White;
                 _titleTriMic.Foreground = System.Windows.Media.Brushes.White;
                 _statusTriMic.Foreground = System.Windows.Media.Brushes.White;
@@ -7028,7 +7102,7 @@ namespace WiFiAudioConnector
                 {
                     _isMicToggling = false;
                     _isActionInProgress = false;
-                    _btnTriMic.IsEnabled = true;
+                    SetButtonLoading(_btnTriMic, false);
                     UpdateTriButtonStates();
                     try
                     {
@@ -7050,11 +7124,12 @@ namespace WiFiAudioConnector
                 if (_isCameraToggling) return;
                 _isCameraToggling = true;
                 _isActionInProgress = true;
-                _btnTriCamera.IsEnabled = false;
+                SetButtonLoading(_btnTriCamera, true);
 
                 bool camOn = _app.IsCameraRunning;
-                _statusTriCamera.Text = camOn ? "● 关闭中..." : "● 开启中...";
+                _statusTriCamera.Text = camOn ? "● 正在关闭..." : "● 正在开启...";
                 _btnTriCamera.Background = new SolidColorBrush(Color.FromArgb(235, 217, 119, 6)); // Amber #D97706
+                _btnTriCamera.BorderBrush = new SolidColorBrush(Color.FromArgb(200, 245, 158, 11));
                 _iconTriCamera.Fill = System.Windows.Media.Brushes.White;
                 _titleTriCamera.Foreground = System.Windows.Media.Brushes.White;
                 _statusTriCamera.Foreground = System.Windows.Media.Brushes.White;
@@ -7079,7 +7154,7 @@ namespace WiFiAudioConnector
                 {
                     _isCameraToggling = false;
                     _isActionInProgress = false;
-                    _btnTriCamera.IsEnabled = true;
+                    SetButtonLoading(_btnTriCamera, false);
                     UpdateTriButtonStates();
                     try
                     {
@@ -7333,6 +7408,7 @@ namespace WiFiAudioConnector
                 VerticalAlignment = VerticalAlignment.Center,
                 Margin = new Thickness(0, 0, 8, 0)
             };
+            _btnMute.Template = CreateCustomButtonTemplate(4, "#334155", "#64748B");
             _btnMute.Click += (s, e) =>
             {
                 bool newMute = !_app.CurrentSettings.IsMuted;
@@ -8155,6 +8231,7 @@ namespace WiFiAudioConnector
                 Cursor = System.Windows.Input.Cursors.Hand,
                 HorizontalAlignment = HorizontalAlignment.Right
             };
+            btnConfigHotkey.Template = CreateCustomButtonTemplate(5, "#475569", "#94A3B8");
             btnConfigHotkey.Click += (s, e) => _app.ShowHotkeyConfigWindow();
             DockPanel.SetDock(btnConfigHotkey, Dock.Right);
 
@@ -8202,7 +8279,7 @@ namespace WiFiAudioConnector
 
         public async void TriggerScan()
         {
-            _btnScan.IsEnabled = false;
+            SetButtonLoading(_btnScan, true);
             _btnScan.Content = UIHelper.CreateIconText("\uE72C", "扫描中", 11, 11);
 
             var discovered = await _app.ScanDevicesAsync();
@@ -8280,7 +8357,7 @@ namespace WiFiAudioConnector
                 RefreshBatteryForSelectedDevice(curSel);
             }
 
-            _btnScan.IsEnabled = true;
+            SetButtonLoading(_btnScan, false);
             _btnScan.Content = UIHelper.CreateIconText("\uE72C", "刷新", 11, 11);
             _btnScan.ToolTip = string.Format("上次扫描: 发现 {0} 台设备\n局域网网段: {1}\n扫描端口: {2}",
                 discovered.Count,
@@ -8573,13 +8650,17 @@ namespace WiFiAudioConnector
                 Cursor = System.Windows.Input.Cursors.Hand,
                 Margin = new Thickness(2, 0, 2, 0)
             };
-            string tpl = @"<ControlTemplate xmlns=""http://schemas.microsoft.com/winfx/2006/xaml/presentation"" TargetType=""Button"">
+            string tpl = @"<ControlTemplate xmlns=""http://schemas.microsoft.com/winfx/2006/xaml/presentation"" xmlns:x=""http://schemas.microsoft.com/winfx/2006/xaml"" TargetType=""Button"">
                 <Border x:Name=""bd"" Background=""{TemplateBinding Background}"" BorderBrush=""{TemplateBinding BorderBrush}"" BorderThickness=""{TemplateBinding BorderThickness}"" CornerRadius=""4"" Padding=""2"">
                     <ContentPresenter HorizontalAlignment=""Center"" VerticalAlignment=""Center""/>
                 </Border>
                 <ControlTemplate.Triggers>
                     <Trigger Property=""IsMouseOver"" Value=""True"">
                         <Setter TargetName=""bd"" Property=""Background"" Value=""#374151""/>
+                        <Setter TargetName=""bd"" Property=""BorderBrush"" Value=""#60A5FA""/>
+                    </Trigger>
+                    <Trigger Property=""IsPressed"" Value=""True"">
+                        <Setter TargetName=""bd"" Property=""Opacity"" Value=""0.75""/>
                     </Trigger>
                 </ControlTemplate.Triggers>
             </ControlTemplate>";
@@ -8757,17 +8838,8 @@ namespace WiFiAudioConnector
 
         private Button CreateNotifySegmentButton(string text, string mode)
         {
-            var btn = new Button
-            {
-                Content = text,
-                FontSize = 11,
-                FontFamily = new FontFamily("Microsoft YaHei UI, Segoe UI"),
-                BorderThickness = new Thickness(0),
-                Background = System.Windows.Media.Brushes.Transparent,
-                Foreground = new SolidColorBrush(Color.FromArgb(180, 160, 170, 190)),
-                Cursor = System.Windows.Input.Cursors.Hand,
-                Height = 22
-            };
+            var btn = CreateSegmentButton(text);
+            btn.Height = 22;
             btn.Click += (s, e) => _app.SetNotificationMode(mode);
             return btn;
         }
@@ -8777,23 +8849,9 @@ namespace WiFiAudioConnector
             Action act = () =>
             {
                 if (_btnNotifyOsd == null || _btnNotifyWin == null || _btnNotifyNone == null) return;
-
-                var activeBg = new SolidColorBrush(Color.FromArgb(240, 20, 120, 240));
-                var activeFg = System.Windows.Media.Brushes.White;
-                var inactiveBg = System.Windows.Media.Brushes.Transparent;
-                var inactiveFg = new SolidColorBrush(Color.FromArgb(180, 160, 170, 190));
-
-                _btnNotifyOsd.Background = (mode == "osd") ? activeBg : inactiveBg;
-                _btnNotifyOsd.Foreground = (mode == "osd") ? activeFg : inactiveFg;
-                _btnNotifyOsd.FontWeight = (mode == "osd") ? FontWeights.Bold : FontWeights.Normal;
-
-                _btnNotifyWin.Background = (mode == "windows") ? activeBg : inactiveBg;
-                _btnNotifyWin.Foreground = (mode == "windows") ? activeFg : inactiveFg;
-                _btnNotifyWin.FontWeight = (mode == "windows") ? FontWeights.Bold : FontWeights.Normal;
-
-                _btnNotifyNone.Background = (mode == "none") ? activeBg : inactiveBg;
-                _btnNotifyNone.Foreground = (mode == "none") ? activeFg : inactiveFg;
-                _btnNotifyNone.FontWeight = (mode == "none") ? FontWeights.Bold : FontWeights.Normal;
+                SetSegmentActive(_btnNotifyOsd, mode == "osd");
+                SetSegmentActive(_btnNotifyWin, mode == "windows");
+                SetSegmentActive(_btnNotifyNone, mode == "none");
             };
             if (CheckAccess()) act();
             else Dispatcher.BeginInvoke(act);
@@ -8848,7 +8906,7 @@ namespace WiFiAudioConnector
                     if (_iconTriCamera != null) _iconTriCamera.Fill = System.Windows.Media.Brushes.White;
                     _btnTriCamera.Background = new SolidColorBrush(Color.FromArgb(235, 217, 119, 6)); // Amber #D97706
                     _btnTriCamera.BorderBrush = new SolidColorBrush(Color.FromArgb(180, 245, 158, 11));
-                    _btnTriCamera.IsEnabled = false;
+                    SetButtonLoading(_btnTriCamera, true);
                 }
             };
             if (CheckAccess()) act();
@@ -8866,14 +8924,44 @@ namespace WiFiAudioConnector
                 Background = System.Windows.Media.Brushes.Transparent,
                 Foreground = new SolidColorBrush(Color.FromArgb(180, 160, 170, 190)),
                 Cursor = System.Windows.Input.Cursors.Hand,
-                Height = 24
+                Height = 24,
+                Tag = false
             };
-            string tpl = @"<ControlTemplate xmlns=""http://schemas.microsoft.com/winfx/2006/xaml/presentation"" TargetType=""Button"">
+            string tpl = @"<ControlTemplate xmlns=""http://schemas.microsoft.com/winfx/2006/xaml/presentation"" xmlns:x=""http://schemas.microsoft.com/winfx/2006/xaml"" TargetType=""Button"">
                 <Border x:Name=""bd"" Background=""{TemplateBinding Background}"" CornerRadius=""4"" Padding=""2"">
                     <ContentPresenter HorizontalAlignment=""Center"" VerticalAlignment=""Center""/>
                 </Border>
             </ControlTemplate>";
             try { btn.Template = (ControlTemplate)XamlReader.Parse(tpl); } catch { }
+
+            btn.MouseEnter += (s, e) =>
+            {
+                bool isActive = (btn.Tag as bool?) ?? false;
+                if (isActive)
+                {
+                    btn.Background = new SolidColorBrush(Color.FromRgb(59, 130, 246));
+                    btn.Foreground = System.Windows.Media.Brushes.White;
+                }
+                else
+                {
+                    btn.Background = new SolidColorBrush(Color.FromArgb(180, 51, 65, 85));
+                    btn.Foreground = new SolidColorBrush(Color.FromRgb(241, 245, 249));
+                }
+            };
+            btn.MouseLeave += (s, e) =>
+            {
+                bool isActive = (btn.Tag as bool?) ?? false;
+                if (isActive)
+                {
+                    btn.Background = new SolidColorBrush(Color.FromRgb(37, 99, 235));
+                    btn.Foreground = System.Windows.Media.Brushes.White;
+                }
+                else
+                {
+                    btn.Background = System.Windows.Media.Brushes.Transparent;
+                    btn.Foreground = new SolidColorBrush(Color.FromArgb(180, 160, 170, 190));
+                }
+            };
             return btn;
         }
 
@@ -8885,9 +8973,10 @@ namespace WiFiAudioConnector
         private void SetSegmentActive(Button btn, bool active)
         {
             if (btn == null) return;
+            btn.Tag = active;
             if (active)
             {
-                btn.Background = new SolidColorBrush(Color.FromArgb(240, 37, 99, 235)); // #2563EB
+                btn.Background = new SolidColorBrush(Color.FromRgb(37, 99, 235)); // #2563EB
                 btn.Foreground = System.Windows.Media.Brushes.White;
                 btn.FontWeight = FontWeights.Bold;
             }
@@ -8998,6 +9087,7 @@ namespace WiFiAudioConnector
             if (_isHiding || !IsVisible) return;
             _isHiding = true;
             _isShowing = false;
+            _lastHideTime = DateTime.UtcNow;
 
             var ease = new CubicEase { EasingMode = EasingMode.EaseIn };
 
@@ -9232,11 +9322,11 @@ namespace WiFiAudioConnector
                             _statusTriCamera.Text = "● 配置中...";
                             _statusTriCamera.Foreground = System.Windows.Media.Brushes.White;
                         }
-                        _btnTriCamera.IsEnabled = false;
+                        SetButtonLoading(_btnTriCamera, true);
                     }
                     else
                     {
-                        _btnTriCamera.IsEnabled = true;
+                        SetButtonLoading(_btnTriCamera, false);
                         if (camOn)
                         {
                             if (_app != null && _app.IsCameraStreaming)
