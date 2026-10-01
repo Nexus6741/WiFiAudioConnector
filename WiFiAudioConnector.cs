@@ -3757,6 +3757,18 @@ namespace WiFiAudioConnector
                 LogLine("Main Exception: " + ex);
                 File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "crash.log"), ex.ToString());
             }
+            finally
+            {
+                LogLine("Main finally entered");
+                CleanAllChildProcesses();
+            }
+        }
+
+        protected override void OnExit(ExitEventArgs e)
+        {
+            LogLine("OnExit called with exit code: " + e.ApplicationExitCode);
+            CleanAllChildProcesses();
+            base.OnExit(e);
         }
 
         protected override void OnStartup(StartupEventArgs e)
@@ -3764,9 +3776,17 @@ namespace WiFiAudioConnector
             base.OnStartup(e);
             ShutdownMode = ShutdownMode.OnExplicitShutdown;
 
+            CleanAllChildProcesses();
+            AppDomain.CurrentDomain.ProcessExit += (s, ev) =>
+            {
+                LogLine("ProcessExit event fired");
+                CleanAllChildProcesses();
+            };
+
             AppDomain.CurrentDomain.UnhandledException += (s, ev) =>
             {
                 LogLine("UnhandledException: " + ev.ExceptionObject);
+                CleanAllChildProcesses();
             };
             DispatcherUnhandledException += (s, ev) =>
             {
@@ -4507,6 +4527,7 @@ namespace WiFiAudioConnector
 
             bool isTcp = target.Contains(":");
 
+            LogLine("ConnectAsync: starting connection to " + target);
             bool ok = await Task.Run<bool>(() =>
             {
                 try
@@ -4514,6 +4535,7 @@ namespace WiFiAudioConnector
                     // 1. adb connect if TCP/IP
                     if (isTcp)
                     {
+                        LogLine("ConnectAsync: adb connecting to " + target);
                         var psiAdb = new ProcessStartInfo
                         {
                             FileName = adbPath,
@@ -4526,6 +4548,7 @@ namespace WiFiAudioConnector
                         {
                             p.WaitForExit(4000);
                         }
+                        LogLine("ConnectAsync: adb connect finished");
                     }
 
                     // 2. build scrcpy arguments for system/media audio
@@ -4540,6 +4563,7 @@ namespace WiFiAudioConnector
                     string modeArg = _settings.MutePhone ? "--audio-source=output" : "--audio-source=playback --audio-dup";
                     string scrcpyArgs = string.Format("-s {0} --no-video --no-window {1} {2} --audio-buffer={3}", target, codecArg, modeArg, bufferMs);
 
+                    LogLine("ConnectAsync: starting scrcpy with " + scrcpyArgs);
                     var psiScrcpy = new ProcessStartInfo
                     {
                         FileName = scrcpyPath,
@@ -4552,7 +4576,9 @@ namespace WiFiAudioConnector
                     _scrcpyProc = Process.Start(psiScrcpy);
                     Thread.Sleep(1500);
 
-                    return _scrcpyProc != null && !_scrcpyProc.HasExited;
+                    bool started = _scrcpyProc != null && !_scrcpyProc.HasExited;
+                    LogLine("ConnectAsync: scrcpy started = " + started);
+                    return started;
                 }
                 catch (Exception ex)
                 {
@@ -4561,6 +4587,7 @@ namespace WiFiAudioConnector
                 }
             });
 
+            LogLine("ConnectAsync: Task.Run returned ok = " + ok);
             _isConnectingScrcpy = false;
 
             if (ok)
@@ -5979,11 +6006,34 @@ namespace WiFiAudioConnector
             }
         }
 
+        public static void CleanAllChildProcesses()
+        {
+            try
+            {
+                string baseDir = AppDomain.CurrentDomain.BaseDirectory.TrimEnd('\\', '/');
+                foreach (var p in Process.GetProcessesByName("scrcpy"))
+                {
+                    try
+                    {
+                        string path = null;
+                        try { path = p.MainModule != null ? p.MainModule.FileName : null; } catch { }
+                        if (string.IsNullOrEmpty(path) || path.StartsWith(baseDir, StringComparison.OrdinalIgnoreCase))
+                        {
+                            p.Kill();
+                        }
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+        }
+
         public void ExitApp()
         {
-            Disconnect();
-            StopCamera();
-            StopMicStream();
+            try { Disconnect(); } catch { }
+            try { StopCamera(); } catch { }
+            try { StopMicStream(); } catch { }
+            CleanAllChildProcesses();
             if (_btConnector != null)
             {
                 _btConnector.Dispose();
