@@ -1689,6 +1689,8 @@ namespace WiFiAudioConnector
         public string CameraFacing = "back"; // "back", "front"
         public string CameraSize = "1920x1080"; // "1920x1080", "3840x2160", "1280x720"
         public int CameraFps = 30; // 30, 60
+        public int CameraOrientation = 0; // 0, 90, 180, 270
+        public bool CameraMirror = false; // Horizontal mirror
         public bool CameraAlwaysOnTop = true;
         public bool CameraVirtualDeviceMode = true; // Use DirectShow Virtual Camera Driver (Phone Wireless Camera)
         public bool CameraShowPreviewWindow = false; // Zero window popup by default (headless D3D off-screen rendering)
@@ -1731,6 +1733,8 @@ namespace WiFiAudioConnector
                 sb.AppendLine("CameraFacing=" + CameraFacing);
                 sb.AppendLine("CameraSize=" + CameraSize);
                 sb.AppendLine("CameraFps=" + CameraFps);
+                sb.AppendLine("CameraOrientation=" + CameraOrientation);
+                sb.AppendLine("CameraMirror=" + (CameraMirror ? "1" : "0"));
                 sb.AppendLine("CameraAlwaysOnTop=" + (CameraAlwaysOnTop ? "1" : "0"));
                 sb.AppendLine("CameraVirtualDeviceMode=" + (CameraVirtualDeviceMode ? "1" : "0"));
                 sb.AppendLine("CameraShowPreviewWindow=" + (CameraShowPreviewWindow ? "1" : "0"));
@@ -1791,6 +1795,8 @@ namespace WiFiAudioConnector
                             else if (k == "CameraFacing") s.CameraFacing = v;
                             else if (k == "CameraSize") s.CameraSize = v;
                             else if (k == "CameraFps") int.TryParse(v, out s.CameraFps);
+                            else if (k == "CameraOrientation") int.TryParse(v, out s.CameraOrientation);
+                            else if (k == "CameraMirror") s.CameraMirror = (v == "1");
                             else if (k == "CameraAlwaysOnTop") s.CameraAlwaysOnTop = (v == "1");
                             else if (k == "CameraVirtualDeviceMode") s.CameraVirtualDeviceMode = (v == "1");
                             else if (k == "CameraShowPreviewWindow") s.CameraShowPreviewWindow = (v == "1");
@@ -2817,6 +2823,11 @@ namespace WiFiAudioConnector
 
         public bool Start(string target, string scrcpyPath, string ffmpegPath, string facing, string size, int fps, bool showPreview, bool alwaysOnTop)
         {
+            return Start(target, scrcpyPath, ffmpegPath, facing, size, fps, 0, false, showPreview, alwaysOnTop);
+        }
+
+        public bool Start(string target, string scrcpyPath, string ffmpegPath, string facing, string size, int fps, int orientation, bool mirror, bool showPreview, bool alwaysOnTop)
+        {
             Stop();
             _stopping = false;
 
@@ -2831,6 +2842,20 @@ namespace WiFiAudioConnector
             if (width <= 0) width = 1920;
             if (height <= 0) height = 1080;
             if (fps <= 0) fps = 30;
+
+            int winW = width;
+            int winH = height;
+            string orientArg = "";
+            if (orientation == 90 || orientation == 270)
+            {
+                winW = height;
+                winH = width;
+                orientArg = string.Format("--capture-orientation={0}", orientation);
+            }
+            else if (orientation == 180)
+            {
+                orientArg = "--capture-orientation=180";
+            }
 
             try
             {
@@ -2849,10 +2874,10 @@ namespace WiFiAudioConnector
                     _accessor.Write(0, (uint)MAX_SHARED_IMAGE_SIZE);
                     _accessor.Write(4, width);
                     _accessor.Write(8, height);
-                    _accessor.Write(12, width * 4);
+                    _accessor.Write(12, width); // NOTE: stride is width in pixels!
                     _accessor.Write(16, 0); // FORMAT_UINT8 (RGBA)
                     _accessor.Write(20, 1); // RESIZEMODE_LINEAR
-                    _accessor.Write(24, 0); // MIRRORMODE_DISABLED
+                    _accessor.Write(24, mirror ? 1 : 0); // MIRRORMODE_HORIZONTALLY
                     _accessor.Write(28, 1000); // timeout ms
                 }
                 finally
@@ -2867,17 +2892,17 @@ namespace WiFiAudioConnector
                 {
                     // Completely hidden off-screen, zero borders
                     windowArgs = string.Format("--window-borderless --window-title={0} --window-x=-32000 --window-y=-32000 --window-width={1} --window-height={2}",
-                        windowTitle, width, height);
+                        windowTitle, winW, winH);
                 }
                 else
                 {
                     string topStr = alwaysOnTop ? "--always-on-top" : "";
                     windowArgs = string.Format("--window-borderless --window-title={0} --window-width={1} --window-height={2} {3}",
-                        windowTitle, width, height, topStr);
+                        windowTitle, winW, winH, topStr);
                 }
 
-                string scrcpyArgs = string.Format("-s {0} --video-source=camera --camera-facing={1} --camera-size={2} --camera-fps={3} --no-audio {4}",
-                    target, facing, size, fps, windowArgs);
+                string scrcpyArgs = string.Format("-s {0} --video-source=camera --camera-facing={1} --camera-size={2} --camera-fps={3} {4} --no-audio {5}",
+                    target, facing, size, fps, orientArg, windowArgs);
 
                 var psiScrcpy = new ProcessStartInfo
                 {
@@ -2923,7 +2948,7 @@ namespace WiFiAudioConnector
                 // 4. Start high-performance native frame pump thread using PrintWindow PW_RENDERFULLCONTENT
                 _pumpThread = new Thread(() =>
                 {
-                    PumpLoop(hwnd, width, height, fps);
+                    PumpLoop(hwnd, winW, winH, width, height, fps, mirror);
                 });
                 _pumpThread.IsBackground = true;
                 _pumpThread.Priority = ThreadPriority.AboveNormal;
@@ -2939,19 +2964,32 @@ namespace WiFiAudioConnector
             }
         }
 
-        private unsafe void PumpLoop(IntPtr hwnd, int width, int height, int fps)
+        private unsafe void PumpLoop(IntPtr hwnd, int winW, int winH, int targetW, int targetH, int fps, bool mirror)
         {
-            System.Drawing.Bitmap bmp = null;
+            System.Drawing.Bitmap bmpWin = null;
+            System.Drawing.Bitmap bmpTarget = null;
             byte* basePtr = null;
 
             try
             {
-                bmp = new System.Drawing.Bitmap(width, height, System.Drawing.Imaging.PixelFormat.Format32bppRgb);
+                bmpWin = new System.Drawing.Bitmap(winW, winH, System.Drawing.Imaging.PixelFormat.Format32bppRgb);
+                bool needScale = (winW != targetW || winH != targetH);
+                if (needScale)
+                {
+                    bmpTarget = new System.Drawing.Bitmap(targetW, targetH, System.Drawing.Imaging.PixelFormat.Format32bppRgb);
+                }
+
                 _accessor.SafeMemoryMappedViewHandle.AcquirePointer(ref basePtr);
                 uint* dstPixels = (uint*)(basePtr + HEADER_SIZE);
-                int totalPixels = width * height;
+                int totalPixels = targetW * targetH;
                 int frameDelayMs = 1000 / Math.Max(1, Math.Min(fps, 60));
                 Stopwatch sw = new Stopwatch();
+
+                float scale = Math.Min((float)targetW / winW, (float)targetH / winH);
+                int drawW = (int)(winW * scale);
+                int drawH = (int)(winH * scale);
+                int drawX = (targetW - drawW) / 2;
+                int drawY = (targetH - drawH) / 2;
 
                 while (!_stopping && _isRunning)
                 {
@@ -2963,15 +3001,26 @@ namespace WiFiAudioConnector
 
                     sw.Restart();
 
-                    using (System.Drawing.Graphics g = System.Drawing.Graphics.FromImage(bmp))
+                    using (System.Drawing.Graphics g = System.Drawing.Graphics.FromImage(bmpWin))
                     {
                         IntPtr hdc = g.GetHdc();
                         PrintWindow(hwnd, hdc, PW_RENDERFULLCONTENT);
                         g.ReleaseHdc(hdc);
                     }
 
-                    System.Drawing.Imaging.BitmapData bd = bmp.LockBits(
-                        new System.Drawing.Rectangle(0, 0, width, height),
+                    System.Drawing.Bitmap renderSource = bmpWin;
+                    if (needScale)
+                    {
+                        using (System.Drawing.Graphics g = System.Drawing.Graphics.FromImage(bmpTarget))
+                        {
+                            g.Clear(System.Drawing.Color.Black);
+                            g.DrawImage(bmpWin, drawX, drawY, drawW, drawH);
+                        }
+                        renderSource = bmpTarget;
+                    }
+
+                    System.Drawing.Imaging.BitmapData bd = renderSource.LockBits(
+                        new System.Drawing.Rectangle(0, 0, targetW, targetH),
                         System.Drawing.Imaging.ImageLockMode.ReadOnly,
                         System.Drawing.Imaging.PixelFormat.Format32bppArgb);
                     try
@@ -2983,12 +3032,12 @@ namespace WiFiAudioConnector
                             try
                             {
                                 _accessor.Write(0, (uint)MAX_SHARED_IMAGE_SIZE);
-                                _accessor.Write(4, width);
-                                _accessor.Write(8, height);
-                                _accessor.Write(12, width * 4);
+                                _accessor.Write(4, targetW);
+                                _accessor.Write(8, targetH);
+                                _accessor.Write(12, targetW); // NOTE: stride = targetW in uint32_t pixels!
                                 _accessor.Write(16, 0); // FORMAT_UINT8 (RGBA)
                                 _accessor.Write(20, 1); // RESIZEMODE_LINEAR
-                                _accessor.Write(24, 0); // MIRRORMODE_DISABLED
+                                _accessor.Write(24, mirror ? 1 : 0); // MIRRORMODE_HORIZONTALLY
                                 _accessor.Write(28, 1000);
 
                                 for (int i = 0; i < totalPixels; i++)
@@ -3006,7 +3055,7 @@ namespace WiFiAudioConnector
                     }
                     finally
                     {
-                        bmp.UnlockBits(bd);
+                        renderSource.UnlockBits(bd);
                     }
 
                     int elapsed = (int)sw.ElapsedMilliseconds;
@@ -3032,10 +3081,15 @@ namespace WiFiAudioConnector
                     try { _accessor.SafeMemoryMappedViewHandle.ReleasePointer(); } catch { }
                     basePtr = null;
                 }
-                if (bmp != null)
+                if (bmpWin != null)
                 {
-                    bmp.Dispose();
-                    bmp = null;
+                    bmpWin.Dispose();
+                    bmpWin = null;
+                }
+                if (bmpTarget != null)
+                {
+                    bmpTarget.Dispose();
+                    bmpTarget = null;
                 }
 
                 if (!_stopping)
@@ -5091,7 +5145,7 @@ namespace WiFiAudioConnector
                             }));
                         };
                     }
-                    return _vcamManager.Start(target, scrcpyPath, ffmpegPath, facing, size, fps, showPreview, _settings.CameraAlwaysOnTop);
+                    return _vcamManager.Start(target, scrcpyPath, ffmpegPath, facing, size, fps, _settings.CameraOrientation, _settings.CameraMirror, showPreview, _settings.CameraAlwaysOnTop);
                 });
 
                 if (ok)
@@ -5112,9 +5166,10 @@ namespace WiFiAudioConnector
             {
                 string topArg = _settings.CameraAlwaysOnTop ? "--always-on-top" : "";
                 string titleArg = string.Format("--window-title=\"📷 手机无线摄像头 - [{0}]\"", devName);
+                string orientArg = _settings.CameraOrientation != 0 ? string.Format("--capture-orientation={0}", _settings.CameraOrientation) : "";
 
-                string args = string.Format("-s {0} --video-source=camera --camera-facing={1} --camera-size={2} --camera-fps={3} {4} --no-audio --window-width=640 --window-height=360 {5}",
-                    target, facing, size, fps, topArg, titleArg);
+                string args = string.Format("-s {0} --video-source=camera --camera-facing={1} --camera-size={2} --camera-fps={3} {4} {5} --no-audio --window-width=640 --window-height=360 {6}",
+                    target, facing, size, fps, orientArg, topArg, titleArg);
 
                 bool ok = await Task.Run<bool>(() =>
                 {
@@ -5135,8 +5190,8 @@ namespace WiFiAudioConnector
                         // If resolution fails on some older phones, fallback to 720P automatically
                         if (_cameraProc == null || _cameraProc.HasExited)
                         {
-                            string fallbackArgs = string.Format("-s {0} --video-source=camera --camera-facing={1} --camera-size=1280x720 --camera-fps=30 {2} --no-audio --window-width=640 --window-height=360 {3}",
-                                target, facing, topArg, titleArg);
+                            string fallbackArgs = string.Format("-s {0} --video-source=camera --camera-facing={1} --camera-size=1280x720 --camera-fps=30 {2} {3} --no-audio --window-width=640 --window-height=360 {4}",
+                                target, facing, orientArg, topArg, titleArg);
                             psi.Arguments = fallbackArgs;
                             _cameraProc = Process.Start(psi);
                             Thread.Sleep(1000);
@@ -6036,6 +6091,31 @@ namespace WiFiAudioConnector
             fpsMenu.Items.Add(fps60);
             camMenu.Items.Add(fpsMenu);
 
+            var orientMenu = new System.Windows.Controls.MenuItem { Header = "🔄 画面旋转" };
+            var rot0 = new System.Windows.Controls.MenuItem { Header = "0° 默认 (横屏正常)", IsChecked = _app.CurrentSettings.CameraOrientation == 0 };
+            var rot90 = new System.Windows.Controls.MenuItem { Header = "90° 顺时针 (竖屏立放)", IsChecked = _app.CurrentSettings.CameraOrientation == 90 };
+            var rot180 = new System.Windows.Controls.MenuItem { Header = "180° 倒置 (倒立放置)", IsChecked = _app.CurrentSettings.CameraOrientation == 180 };
+            var rot270 = new System.Windows.Controls.MenuItem { Header = "270° 逆时针 (反向立放)", IsChecked = _app.CurrentSettings.CameraOrientation == 270 };
+            rot0.Click += async (s, e) => { _app.CurrentSettings.CameraOrientation = 0; _app.CurrentSettings.Save(); rot0.IsChecked = true; rot90.IsChecked = false; rot180.IsChecked = false; rot270.IsChecked = false; if (_app.IsCameraRunning) await _app.StartCameraAsync(); };
+            rot90.Click += async (s, e) => { _app.CurrentSettings.CameraOrientation = 90; _app.CurrentSettings.Save(); rot90.IsChecked = true; rot0.IsChecked = false; rot180.IsChecked = false; rot270.IsChecked = false; if (_app.IsCameraRunning) await _app.StartCameraAsync(); };
+            rot180.Click += async (s, e) => { _app.CurrentSettings.CameraOrientation = 180; _app.CurrentSettings.Save(); rot180.IsChecked = true; rot0.IsChecked = false; rot90.IsChecked = false; rot270.IsChecked = false; if (_app.IsCameraRunning) await _app.StartCameraAsync(); };
+            rot270.Click += async (s, e) => { _app.CurrentSettings.CameraOrientation = 270; _app.CurrentSettings.Save(); rot270.IsChecked = true; rot0.IsChecked = false; rot90.IsChecked = false; rot180.IsChecked = false; if (_app.IsCameraRunning) await _app.StartCameraAsync(); };
+            orientMenu.Items.Add(rot0);
+            orientMenu.Items.Add(rot90);
+            orientMenu.Items.Add(rot180);
+            orientMenu.Items.Add(rot270);
+            camMenu.Items.Add(orientMenu);
+
+            var itemMirror = new System.Windows.Controls.MenuItem { Header = "🪞 水平镜像翻转 (自拍镜面)", IsChecked = _app.CurrentSettings.CameraMirror };
+            itemMirror.Click += async (s, e) =>
+            {
+                _app.CurrentSettings.CameraMirror = !_app.CurrentSettings.CameraMirror;
+                _app.CurrentSettings.Save();
+                itemMirror.IsChecked = _app.CurrentSettings.CameraMirror;
+                if (_app.IsCameraRunning) await _app.StartCameraAsync();
+            };
+            camMenu.Items.Add(itemMirror);
+
             camMenu.Items.Add(new System.Windows.Controls.Separator());
 
             var itemVirtualMode = new System.Windows.Controls.MenuItem { Header = "🎥 虚拟摄像头驱动模式 (系统原生直连)", IsChecked = _app.CurrentSettings.CameraVirtualDeviceMode };
@@ -6101,6 +6181,11 @@ namespace WiFiAudioConnector
                 itemVirtualMode.IsChecked = _app.CurrentSettings.CameraVirtualDeviceMode;
                 itemPreview.IsChecked = _app.CurrentSettings.CameraShowPreviewWindow;
                 itemTop.IsChecked = _app.CurrentSettings.CameraAlwaysOnTop;
+                rot0.IsChecked = (_app.CurrentSettings.CameraOrientation == 0);
+                rot90.IsChecked = (_app.CurrentSettings.CameraOrientation == 90);
+                rot180.IsChecked = (_app.CurrentSettings.CameraOrientation == 180);
+                rot270.IsChecked = (_app.CurrentSettings.CameraOrientation == 270);
+                itemMirror.IsChecked = _app.CurrentSettings.CameraMirror;
             };
 
             _btnTriCamera.ContextMenu = camMenu;
