@@ -1686,8 +1686,8 @@ namespace WiFiAudioConnector
         public bool MutePhone = true;
         public bool MicDirectMode = false;
         public string CameraFacing = "back"; // "back", "front"
-        public string CameraSize = "3840x2160"; // "3840x2160", "1920x1080", "1280x720"
-        public int CameraFps = 60; // 60, 30
+        public string CameraSize = "1920x1080"; // "1920x1080", "3840x2160", "1280x720"
+        public int CameraFps = 30; // 30, 60
         public bool CameraAlwaysOnTop = true;
         public bool AutoConnect = true;
         public string NotificationMode = "osd"; // "osd", "windows", "none"
@@ -2731,9 +2731,22 @@ namespace WiFiAudioConnector
             }
             else
             {
-                if (!IsScrcpyConnected || string.IsNullOrEmpty(_currentScrcpyTarget)) return false;
-                if (string.Equals(_currentScrcpyTarget, target, StringComparison.OrdinalIgnoreCase)) return true;
-                if (_currentScrcpyTarget.StartsWith(target + ":", StringComparison.OrdinalIgnoreCase)) return true;
+                if (IsScrcpyConnected && !string.IsNullOrEmpty(_currentScrcpyTarget))
+                {
+                    if (string.Equals(_currentScrcpyTarget, target, StringComparison.OrdinalIgnoreCase)) return true;
+                    if (_currentScrcpyTarget.StartsWith(target + ":", StringComparison.OrdinalIgnoreCase)) return true;
+                    if (target.Contains(":") && _currentScrcpyTarget.Split(':')[0] == target.Split(':')[0]) return true;
+                }
+                if (IsMicRunning || IsCameraRunning)
+                {
+                    string curTarget = !string.IsNullOrEmpty(_currentScrcpyTarget) ? _currentScrcpyTarget : _settings.Target;
+                    if (!string.IsNullOrEmpty(curTarget))
+                    {
+                        if (string.Equals(curTarget, target, StringComparison.OrdinalIgnoreCase)) return true;
+                        if (curTarget.StartsWith(target + ":", StringComparison.OrdinalIgnoreCase)) return true;
+                        if (target.Contains(":") && curTarget.Split(':')[0] == target.Split(':')[0]) return true;
+                    }
+                }
                 return false;
             }
         }
@@ -2881,7 +2894,7 @@ namespace WiFiAudioConnector
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("连接当前设备", null, (s, e) => ConnectAsync());
             menu.Items.Add("断开连接", null, (s, e) => Disconnect());
-            _trayCameraItem = new ToolStripMenuItem("📷 开启 4K 无线摄像头", null, (s, e) => ToggleCamera());
+            _trayCameraItem = new ToolStripMenuItem("📷 开启无线摄像头", null, (s, e) => ToggleCamera());
             menu.Items.Add(_trayCameraItem);
             menu.Items.Add("扫描局域网、USB与蓝牙设备", null, (s, e) =>
             {
@@ -3425,7 +3438,9 @@ namespace WiFiAudioConnector
         {
             bool scrcpyOn = IsScrcpyConnected;
             bool btOn = IsBluetoothConnected;
-            UpdateTrayIcon(scrcpyOn || btOn);
+            bool micOn = IsMicRunning;
+            bool camOn = IsCameraRunning;
+            UpdateTrayIcon(scrcpyOn || btOn || micOn || camOn);
 
             if (scrcpyOn && btOn)
             {
@@ -3434,12 +3449,17 @@ namespace WiFiAudioConnector
             else if (scrcpyOn)
             {
                 string modeTag = (_currentScrcpyTarget != null && _currentScrcpyTarget.Contains(":")) ? "Wi-Fi" : "USB";
-                string roleTag = _settings.MicDirectMode ? "手机麦克风设备" : "已连接";
+                string roleTag = micOn ? "音频+麦克风" : (camOn ? "音频+摄像头" : "已连接");
                 _notifyIcon.Text = TruncateNotifyText(string.Format("WiFi 音频连接器 - {0} [{1}] ({2})", _currentScrcpyDeviceName ?? _settings.DeviceName, modeTag, roleTag));
             }
             else if (btOn)
             {
                 _notifyIcon.Text = TruncateNotifyText(string.Format("WiFi 音频连接器 - {0} [蓝牙] (已连接)", _currentBtDeviceName ?? _settings.DeviceName));
+            }
+            else if (micOn || camOn)
+            {
+                string tag = (micOn && camOn) ? "麦克风+摄像头" : (micOn ? "麦克风直连" : "无线摄像头");
+                _notifyIcon.Text = TruncateNotifyText(string.Format("WiFi 音频连接器 - {0} ({1})", _settings.DeviceName, tag));
             }
             else
             {
@@ -3713,21 +3733,39 @@ namespace WiFiAudioConnector
             if (!string.IsNullOrEmpty(specificTarget))
             {
                 bool isBt = specificTarget.StartsWith(@"\\?\BTHENUM", StringComparison.OrdinalIgnoreCase) || specificTarget.StartsWith("Bluetooth#", StringComparison.OrdinalIgnoreCase);
-                if (isBt) DisconnectBluetooth(true);
-                else DisconnectScrcpy(true);
+                if (isBt)
+                {
+                    DisconnectBluetooth(true);
+                }
+                else
+                {
+                    DisconnectScrcpy(true);
+                    StopMicStream();
+                    StopCamera();
+                }
                 return;
             }
 
             var sel = (_flyout != null) ? _flyout.GetSelectedDevice() : null;
             if (sel != null && !string.IsNullOrEmpty(sel.Target))
             {
-                if (sel.IsBluetooth) DisconnectBluetooth(true);
-                else DisconnectScrcpy(true);
+                if (sel.IsBluetooth)
+                {
+                    DisconnectBluetooth(true);
+                }
+                else
+                {
+                    DisconnectScrcpy(true);
+                    StopMicStream();
+                    StopCamera();
+                }
             }
             else
             {
                 if (IsBluetoothConnected) DisconnectBluetooth(true);
                 if (IsScrcpyConnected) DisconnectScrcpy(true);
+                StopMicStream();
+                StopCamera();
             }
         }
 
@@ -3756,8 +3794,6 @@ namespace WiFiAudioConnector
             StopBatteryMonitor();
             _lastBatteryInfo = null;
             if (_flyout != null) _flyout.UpdateBatteryUI(null);
-
-            StopMicStream();
 
             if (_settings.SyncPhoneVolume && _settings.MuteOnDisconnect && !string.IsNullOrEmpty(targetToMute))
             {
@@ -4574,10 +4610,10 @@ namespace WiFiAudioConnector
             }
 
             string facing = _settings.CameraFacing ?? "back";
-            string size = _settings.CameraSize ?? "3840x2160";
-            int fps = _settings.CameraFps > 0 ? _settings.CameraFps : 60;
+            string size = _settings.CameraSize ?? "1920x1080";
+            int fps = _settings.CameraFps > 0 ? _settings.CameraFps : 30;
             string topArg = _settings.CameraAlwaysOnTop ? "--always-on-top" : "";
-            string titleArg = string.Format("--window-title=\"📷 手机 4K 超清无线摄像头 - [{0}]\"", devName);
+            string titleArg = string.Format("--window-title=\"📷 手机无线摄像头 - [{0}]\"", devName);
 
             string args = string.Format("-s {0} --video-source=camera --camera-facing={1} --camera-size={2} --camera-fps={3} {4} --no-audio {5}",
                 target, facing, size, fps, topArg, titleArg);
@@ -4598,10 +4634,10 @@ namespace WiFiAudioConnector
                     _cameraProc = Process.Start(psi);
                     Thread.Sleep(1000);
 
-                    // If 4K resolution fails on some older phones, fallback to 1080P automatically
+                    // If resolution fails on some older phones, fallback to 720P automatically
                     if (_cameraProc == null || _cameraProc.HasExited)
                     {
-                        string fallbackArgs = string.Format("-s {0} --video-source=camera --camera-facing={1} --camera-size=1920x1080 --camera-fps=30 {2} --no-audio {3}",
+                        string fallbackArgs = string.Format("-s {0} --video-source=camera --camera-facing={1} --camera-size=1280x720 --camera-fps=30 {2} --no-audio {3}",
                             target, facing, topArg, titleArg);
                         psi.Arguments = fallbackArgs;
                         _cameraProc = Process.Start(psi);
@@ -4620,7 +4656,7 @@ namespace WiFiAudioConnector
             if (ok)
             {
                 UpdateCameraUI();
-                ShowNotification("无线摄像头已启动", string.Format("{0}\n已开启超清无线摄像头画面\n支持置顶/变焦/OBS采集", devName), ToolTipIcon.Info);
+                ShowNotification("无线摄像头已启动", string.Format("{0}\n已开启无线摄像头画面 (1080P 30FPS)\n支持置顶/变焦/OBS采集", devName), ToolTipIcon.Info);
 
                 var proc = _cameraProc;
                 // Watchdog task
@@ -4676,8 +4712,9 @@ namespace WiFiAudioConnector
             }
             if (_trayCameraItem != null)
             {
-                _trayCameraItem.Text = IsCameraRunning ? "⏹ 关闭无线摄像头" : "📷 开启 4K 无线摄像头";
+                _trayCameraItem.Text = IsCameraRunning ? "⏹ 关闭无线摄像头" : "📷 开启无线摄像头";
             }
+            UpdateOverallState();
         }
 
         public async Task<bool> StartMicStreamAsync(string specificTarget = null, string specificName = null)
@@ -4781,17 +4818,20 @@ namespace WiFiAudioConnector
                         if (_micProc == proc)
                         {
                             _micProc = null;
+                            UpdateOverallState();
                         }
                     }));
                 });
 
                 string recTip = !string.IsNullOrEmpty(matchingMic) ? "\n录音输入请选择: 「手机麦克风设备」" : "\n电脑耳机监听输出 (可配合虚拟声卡开黑)";
                 ShowNotification("手机麦克风已就绪", string.Format("{0}\n已开启手机麦克风直连电脑{1}\n(系统音频与麦克风同时工作，手机不外放)", devName, recTip), ToolTipIcon.Info);
+                UpdateOverallState();
                 return true;
             }
             else
             {
                 _micProc = null;
+                UpdateOverallState();
                 ShowNotification("麦克风启动失败", "未能连接手机麦克风，请检查手机录音权限或连接状态", ToolTipIcon.Warning);
                 return false;
             }
@@ -4809,6 +4849,7 @@ namespace WiFiAudioConnector
             }
             catch { }
             _micProc = null;
+            UpdateOverallState();
             if (showNotice)
             {
                 ShowNotification("手机麦克风已断开", "手机麦克风直连已停止，手机系统音频正常传输", ToolTipIcon.Info);
@@ -4875,8 +4916,9 @@ namespace WiFiAudioConnector
         private RadioButton _rbLatencyBalanced;
         private RadioButton _rbLatencySmooth;
         private CheckBox _cbMutePhone;
-        private CheckBox _cbMicDirect;
-        private TextBlock _tbMicTip;
+        private Button _btnTriAudio;
+        private Button _btnTriMic;
+        private Button _btnTriCamera;
         private CheckBox _cbAutoConnect;
         private Button _btnNotifyOsd;
         private Button _btnNotifyWin;
@@ -4894,19 +4936,6 @@ namespace WiFiAudioConnector
         private TextBlock _tbColon;
         private Border _volumeCard;
         private Border _qualityCard;
-        private Border _cameraCard;
-        private Button _btnCameraToggle;
-        private TextBlock _tbCameraStatus;
-        private Button _btnToggleCamDetails;
-        private StackPanel _cameraDetailsPanel;
-        private RadioButton _rbCamBack;
-        private RadioButton _rbCamFront;
-        private RadioButton _rbCam4K;
-        private RadioButton _rbCam1080P;
-        private RadioButton _rbCam720P;
-        private RadioButton _rbCam60Fps;
-        private RadioButton _rbCam30Fps;
-        private CheckBox _cbCamAlwaysOnTop;
         private bool _isProgrammaticTextChange = false;
         private TextBlock _txtHotkeyDisplay;
         private List<DeviceItem> _deviceList = new List<DeviceItem>();
@@ -5245,6 +5274,144 @@ namespace WiFiAudioConnector
                 }
             };
             devicePanel.Children.Add(_btnConnect);
+
+            // Three-channel quick control buttons: Audio, Mic, Camera
+            var triGrid = new Grid { Margin = new Thickness(0, 8, 0, 0) };
+            triGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            triGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(6, GridUnitType.Pixel) });
+            triGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            triGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(6, GridUnitType.Pixel) });
+            triGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+            _btnTriAudio = new Button
+            {
+                Content = "🔊 音频推流",
+                Height = 30,
+                FontSize = 11.5,
+                FontFamily = new FontFamily("Segoe UI Emoji, Microsoft YaHei UI"),
+                Background = new SolidColorBrush(Color.FromArgb(160, 48, 52, 65)),
+                Foreground = new SolidColorBrush(Color.FromArgb(220, 209, 213, 219)),
+                BorderThickness = new Thickness(0),
+                Cursor = System.Windows.Input.Cursors.Hand,
+                ToolTip = "点击开启/关闭手机系统音频推流\n手机扬声器静音，电脑音箱同步播放"
+            };
+            _btnTriAudio.Click += (s, e) =>
+            {
+                if (_app.IsScrcpyConnected)
+                {
+                    _app.DisconnectScrcpy(true);
+                }
+                else if (_app.IsBluetoothConnected)
+                {
+                    _app.DisconnectBluetooth(true);
+                }
+                else
+                {
+                    var sel = _cbDevices != null ? _cbDevices.SelectedItem as DeviceItem : null;
+                    string target = (sel != null && !string.IsNullOrEmpty(sel.Target)) ? sel.Target : _app.CurrentSettings.Target;
+                    string devName = (sel != null && !string.IsNullOrEmpty(sel.Name)) ? sel.Name : _app.CurrentSettings.DeviceName;
+                    _app.ConnectAsync(target, devName);
+                }
+            };
+
+            _btnTriMic = new Button
+            {
+                Content = "🎙️ 麦克风直连",
+                Height = 30,
+                FontSize = 11.5,
+                FontFamily = new FontFamily("Segoe UI Emoji, Microsoft YaHei UI"),
+                Background = new SolidColorBrush(Color.FromArgb(160, 48, 52, 65)),
+                Foreground = new SolidColorBrush(Color.FromArgb(220, 209, 213, 219)),
+                BorderThickness = new Thickness(0),
+                Cursor = System.Windows.Input.Cursors.Hand,
+                ToolTip = "点击开启/关闭手机麦克风直连电脑\n驱动已智能绑定: 手机麦克风设备\n开黑/会议录音输入请选: 「手机麦克风设备」"
+            };
+            _btnTriMic.Click += async (s, e) =>
+            {
+                if (_app.IsMicRunning)
+                {
+                    _app.CurrentSettings.MicDirectMode = false;
+                    _app.CurrentSettings.Save();
+                    _app.StopMicStream(true);
+                }
+                else
+                {
+                    _app.CurrentSettings.MicDirectMode = true;
+                    _app.CurrentSettings.Save();
+                    await _app.StartMicStreamAsync();
+                }
+            };
+
+            _btnTriCamera = new Button
+            {
+                Content = "📷 无线摄像头",
+                Height = 30,
+                FontSize = 11.5,
+                FontFamily = new FontFamily("Segoe UI Emoji, Microsoft YaHei UI"),
+                Background = new SolidColorBrush(Color.FromArgb(160, 48, 52, 65)),
+                Foreground = new SolidColorBrush(Color.FromArgb(220, 209, 213, 219)),
+                BorderThickness = new Thickness(0),
+                Cursor = System.Windows.Input.Cursors.Hand,
+                ToolTip = "左键: 开关无线摄像头 (默认 1080P 30FPS)\n右键: 配置镜头方向、分辨率与帧率"
+            };
+            _btnTriCamera.Click += (s, e) =>
+            {
+                _app.ToggleCamera();
+            };
+
+            // Setup right-click ContextMenu on Camera Button for resolution, lens, fps
+            var camMenu = new System.Windows.Controls.ContextMenu();
+            var itemFacing = new System.Windows.Controls.MenuItem { Header = _app.CurrentSettings.CameraFacing == "front" ? "📱 镜头: 前置自拍" : "📷 镜头: 后置主摄" };
+            itemFacing.Click += async (s, e) =>
+            {
+                _app.CurrentSettings.CameraFacing = (_app.CurrentSettings.CameraFacing == "front") ? "back" : "front";
+                _app.CurrentSettings.Save();
+                itemFacing.Header = _app.CurrentSettings.CameraFacing == "front" ? "📱 镜头: 前置自拍" : "📷 镜头: 后置主摄";
+                if (_app.IsCameraRunning) await _app.StartCameraAsync();
+            };
+            camMenu.Items.Add(itemFacing);
+
+            var resMenu = new System.Windows.Controls.MenuItem { Header = "🖥️ 分辨率设置" };
+            var r1080 = new System.Windows.Controls.MenuItem { Header = "1080P 推荐 (默认)", IsChecked = _app.CurrentSettings.CameraSize == "1920x1080" };
+            var r4k = new System.Windows.Controls.MenuItem { Header = "4K 极清", IsChecked = _app.CurrentSettings.CameraSize == "3840x2160" };
+            var r720 = new System.Windows.Controls.MenuItem { Header = "720P 极速", IsChecked = _app.CurrentSettings.CameraSize == "1280x720" };
+            r1080.Click += async (s, e) => { _app.CurrentSettings.CameraSize = "1920x1080"; _app.CurrentSettings.Save(); r1080.IsChecked = true; r4k.IsChecked = false; r720.IsChecked = false; if (_app.IsCameraRunning) await _app.StartCameraAsync(); };
+            r4k.Click += async (s, e) => { _app.CurrentSettings.CameraSize = "3840x2160"; _app.CurrentSettings.Save(); r4k.IsChecked = true; r1080.IsChecked = false; r720.IsChecked = false; if (_app.IsCameraRunning) await _app.StartCameraAsync(); };
+            r720.Click += async (s, e) => { _app.CurrentSettings.CameraSize = "1280x720"; _app.CurrentSettings.Save(); r720.IsChecked = true; r1080.IsChecked = false; r4k.IsChecked = false; if (_app.IsCameraRunning) await _app.StartCameraAsync(); };
+            resMenu.Items.Add(r1080);
+            resMenu.Items.Add(r4k);
+            resMenu.Items.Add(r720);
+            camMenu.Items.Add(resMenu);
+
+            var fpsMenu = new System.Windows.Controls.MenuItem { Header = "⚡ 帧率设置" };
+            var fps30 = new System.Windows.Controls.MenuItem { Header = "30 FPS (默认推荐)", IsChecked = _app.CurrentSettings.CameraFps == 30 };
+            var fps60 = new System.Windows.Controls.MenuItem { Header = "60 FPS 极速", IsChecked = _app.CurrentSettings.CameraFps == 60 };
+            fps30.Click += async (s, e) => { _app.CurrentSettings.CameraFps = 30; _app.CurrentSettings.Save(); fps30.IsChecked = true; fps60.IsChecked = false; if (_app.IsCameraRunning) await _app.StartCameraAsync(); };
+            fps60.Click += async (s, e) => { _app.CurrentSettings.CameraFps = 60; _app.CurrentSettings.Save(); fps60.IsChecked = true; fps30.IsChecked = false; if (_app.IsCameraRunning) await _app.StartCameraAsync(); };
+            fpsMenu.Items.Add(fps30);
+            fpsMenu.Items.Add(fps60);
+            camMenu.Items.Add(fpsMenu);
+
+            var itemTop = new System.Windows.Controls.MenuItem { Header = "📌 窗口置顶", IsChecked = _app.CurrentSettings.CameraAlwaysOnTop };
+            itemTop.Click += async (s, e) =>
+            {
+                _app.CurrentSettings.CameraAlwaysOnTop = !_app.CurrentSettings.CameraAlwaysOnTop;
+                _app.CurrentSettings.Save();
+                itemTop.IsChecked = _app.CurrentSettings.CameraAlwaysOnTop;
+                if (_app.IsCameraRunning) await _app.StartCameraAsync();
+            };
+            camMenu.Items.Add(itemTop);
+
+            _btnTriCamera.ContextMenu = camMenu;
+
+            Grid.SetColumn(_btnTriAudio, 0);
+            Grid.SetColumn(_btnTriMic, 2);
+            Grid.SetColumn(_btnTriCamera, 4);
+
+            triGrid.Children.Add(_btnTriAudio);
+            triGrid.Children.Add(_btnTriMic);
+            triGrid.Children.Add(_btnTriCamera);
+            devicePanel.Children.Add(triGrid);
 
             deviceCard.Child = devicePanel;
             root.Children.Add(deviceCard);
@@ -5593,7 +5760,7 @@ namespace WiFiAudioConnector
                 Content = "手机扬声器静音 (仅电脑端音箱/耳机播放)",
                 Foreground = System.Windows.Media.Brushes.White,
                 FontSize = 11,
-                Margin = new Thickness(0, 0, 0, 6),
+                Margin = new Thickness(0, 0, 0, 0),
                 IsChecked = _app.CurrentSettings.MutePhone
             };
             _cbMutePhone.Checked += (s, e) =>
@@ -5618,230 +5785,8 @@ namespace WiFiAudioConnector
             };
             qualityPanel.Children.Add(_cbMutePhone);
 
-            _cbMicDirect = new CheckBox
-            {
-                Content = "🎙️ 手机麦克风直连电脑 (变身无线话筒/开黑连麦)",
-                FontFamily = new FontFamily("Segoe UI Emoji, Microsoft YaHei UI"),
-                Foreground = System.Windows.Media.Brushes.White,
-                FontSize = 11,
-                Margin = new Thickness(0, 0, 0, 4),
-                IsChecked = _app.CurrentSettings.MicDirectMode
-            };
-            _tbMicTip = new TextBlock
-            {
-                FontSize = 10,
-                FontFamily = new FontFamily("Segoe UI Emoji, Microsoft YaHei UI"),
-                Foreground = new SolidColorBrush(Color.FromArgb(220, 125, 211, 252)),
-                Background = new SolidColorBrush(Color.FromArgb(80, 14, 165, 233)),
-                Padding = new Thickness(8, 4, 8, 4),
-                Margin = new Thickness(0, 0, 0, 4),
-                TextWrapping = TextWrapping.Wrap,
-                Visibility = _app.CurrentSettings.MicDirectMode ? Visibility.Visible : Visibility.Collapsed
-            };
-            UpdateMicTipText();
-
-            _cbMicDirect.Checked += async (s, e) =>
-            {
-                if (_app.CurrentSettings.MicDirectMode) return;
-                _app.CurrentSettings.MicDirectMode = true;
-                _app.CurrentSettings.Save();
-                UpdateMicTipText();
-                _tbMicTip.Visibility = Visibility.Visible;
-                if (_app.IsScrcpyConnected)
-                {
-                    await _app.StartMicStreamAsync();
-                }
-            };
-            _cbMicDirect.Unchecked += (s, e) =>
-            {
-                if (!_app.CurrentSettings.MicDirectMode) return;
-                _app.CurrentSettings.MicDirectMode = false;
-                _app.CurrentSettings.Save();
-                _tbMicTip.Visibility = Visibility.Collapsed;
-                _app.StopMicStream(true);
-            };
-            qualityPanel.Children.Add(_cbMicDirect);
-            qualityPanel.Children.Add(_tbMicTip);
-
             _qualityCard.Child = qualityPanel;
             root.Children.Add(_qualityCard);
-
-            // 📷 Camera Card (Positioned directly above notification mode!)
-            _cameraCard = new Border
-            {
-                Background = new SolidColorBrush(Color.FromArgb(160, 42, 45, 54)),
-                CornerRadius = new CornerRadius(8),
-                Padding = new Thickness(12),
-                Margin = new Thickness(0, 0, 0, 10)
-            };
-            var cameraPanel = new StackPanel();
-
-            // Header row with Title and Status Badge
-            var camHeaderRow = new DockPanel { Margin = new Thickness(0, 0, 0, 8) };
-            var camTitle = new TextBlock
-            {
-                Text = "📷 4K 超清无线摄像头",
-                FontSize = 12,
-                FontWeight = FontWeights.Bold,
-                FontFamily = new FontFamily("Segoe UI Emoji, Microsoft YaHei UI"),
-                Foreground = System.Windows.Media.Brushes.White,
-                VerticalAlignment = VerticalAlignment.Center
-            };
-            DockPanel.SetDock(camTitle, Dock.Left);
-            camHeaderRow.Children.Add(camTitle);
-
-            var headerRight = new StackPanel { Orientation = Orientation.Horizontal };
-            _tbCameraStatus = new TextBlock
-            {
-                Text = _app.IsCameraRunning ? "🟢 4K 运行中" : "未开启",
-                FontSize = 10.5,
-                FontWeight = FontWeights.SemiBold,
-                FontFamily = new FontFamily("Segoe UI Emoji, Microsoft YaHei UI"),
-                Foreground = _app.IsCameraRunning ? new SolidColorBrush(Color.FromArgb(255, 34, 197, 94)) : new SolidColorBrush(Color.FromArgb(160, 148, 163, 184)),
-                VerticalAlignment = VerticalAlignment.Center,
-                Margin = new Thickness(0, 0, 8, 0)
-            };
-            headerRight.Children.Add(_tbCameraStatus);
-
-            _btnToggleCamDetails = new Button
-            {
-                Content = "⚙ 设置 ▼",
-                FontSize = 10,
-                FontFamily = new FontFamily("Segoe UI Emoji, Microsoft YaHei UI"),
-                Background = new SolidColorBrush(Color.FromArgb(120, 50, 55, 68)),
-                Foreground = new SolidColorBrush(Color.FromArgb(220, 200, 215, 235)),
-                BorderThickness = new Thickness(0),
-                Cursor = System.Windows.Input.Cursors.Hand,
-                Padding = new Thickness(6, 2, 6, 2),
-                Height = 20,
-                VerticalAlignment = VerticalAlignment.Center
-            };
-            headerRight.Children.Add(_btnToggleCamDetails);
-
-            DockPanel.SetDock(headerRight, Dock.Right);
-            camHeaderRow.Children.Add(headerRight);
-            cameraPanel.Children.Add(camHeaderRow);
-
-            // Toggle Button
-            _btnCameraToggle = new Button
-            {
-                Content = _app.IsCameraRunning ? "⏹ 关闭无线摄像头" : "🚀 开启 4K 无线摄像头 (独立悬浮监看/直播)",
-                Height = 28,
-                FontSize = 11,
-                FontWeight = FontWeights.SemiBold,
-                FontFamily = new FontFamily("Segoe UI Emoji, Microsoft YaHei UI"),
-                Background = _app.IsCameraRunning ? new SolidColorBrush(Color.FromArgb(220, 215, 60, 60)) : new SolidColorBrush(Color.FromArgb(230, 14, 165, 233)),
-                Foreground = System.Windows.Media.Brushes.White,
-                BorderThickness = new Thickness(0),
-                Cursor = System.Windows.Input.Cursors.Hand,
-                Margin = new Thickness(0, 0, 0, 0)
-            };
-            _btnCameraToggle.Click += (s, e) =>
-            {
-                _app.ToggleCamera();
-            };
-            cameraPanel.Children.Add(_btnCameraToggle);
-
-            // Collapsible Details & Parameter Panel (Hidden by default to keep panel compact!)
-            _cameraDetailsPanel = new StackPanel
-            {
-                Margin = new Thickness(0, 6, 0, 0),
-                Visibility = Visibility.Collapsed
-            };
-
-            _btnToggleCamDetails.Click += (s, e) =>
-            {
-                bool isCollapsed = (_cameraDetailsPanel.Visibility == Visibility.Collapsed);
-                _cameraDetailsPanel.Visibility = isCollapsed ? Visibility.Visible : Visibility.Collapsed;
-                _btnToggleCamDetails.Content = isCollapsed ? "▲ 收起" : "⚙ 设置 ▼";
-            };
-
-            // Lens selection row
-            var lensRow = new DockPanel { Margin = new Thickness(0, 0, 0, 4) };
-            var tbLens = new TextBlock { Text = "镜头:", FontSize = 10.5, FontFamily = new FontFamily("Segoe UI Emoji, Microsoft YaHei UI"), Foreground = new SolidColorBrush(Color.FromArgb(180, 200, 210, 225)), Width = 34, VerticalAlignment = VerticalAlignment.Center };
-            DockPanel.SetDock(tbLens, Dock.Left);
-            lensRow.Children.Add(tbLens);
-
-            var lensGroup = new StackPanel { Orientation = Orientation.Horizontal };
-            _rbCamBack = new RadioButton { Content = "📷 后置主摄 (4K)", GroupName = "CamFacing", FontSize = 10.5, FontFamily = new FontFamily("Segoe UI Emoji, Microsoft YaHei UI"), Foreground = System.Windows.Media.Brushes.White, Margin = new Thickness(0, 0, 12, 0), IsChecked = _app.CurrentSettings.CameraFacing == "back" };
-            _rbCamFront = new RadioButton { Content = "📱 前置自拍 (广角)", GroupName = "CamFacing", FontSize = 10.5, FontFamily = new FontFamily("Segoe UI Emoji, Microsoft YaHei UI"), Foreground = System.Windows.Media.Brushes.White, IsChecked = _app.CurrentSettings.CameraFacing == "front" };
-            _rbCamBack.Checked += async (s, e) => { _app.CurrentSettings.CameraFacing = "back"; _app.CurrentSettings.Save(); if (_app.IsCameraRunning) await _app.StartCameraAsync(); };
-            _rbCamFront.Checked += async (s, e) => { _app.CurrentSettings.CameraFacing = "front"; _app.CurrentSettings.Save(); if (_app.IsCameraRunning) await _app.StartCameraAsync(); };
-            lensGroup.Children.Add(_rbCamBack);
-            lensGroup.Children.Add(_rbCamFront);
-            lensRow.Children.Add(lensGroup);
-            _cameraDetailsPanel.Children.Add(lensRow);
-
-            // Resolution selection row
-            var resRow = new DockPanel { Margin = new Thickness(0, 0, 0, 4) };
-            var tbRes = new TextBlock { Text = "画质:", FontSize = 10.5, Foreground = new SolidColorBrush(Color.FromArgb(180, 200, 210, 225)), Width = 34, VerticalAlignment = VerticalAlignment.Center };
-            DockPanel.SetDock(tbRes, Dock.Left);
-            resRow.Children.Add(tbRes);
-
-            var resGroup = new StackPanel { Orientation = Orientation.Horizontal };
-            _rbCam4K = new RadioButton { Content = "4K 极清", GroupName = "CamRes", FontSize = 10.5, Foreground = System.Windows.Media.Brushes.White, Margin = new Thickness(0, 0, 10, 0), IsChecked = _app.CurrentSettings.CameraSize == "3840x2160" };
-            _rbCam1080P = new RadioButton { Content = "1080P 推荐", GroupName = "CamRes", FontSize = 10.5, Foreground = System.Windows.Media.Brushes.White, Margin = new Thickness(0, 0, 10, 0), IsChecked = _app.CurrentSettings.CameraSize == "1920x1080" };
-            _rbCam720P = new RadioButton { Content = "720P 极速", GroupName = "CamRes", FontSize = 10.5, Foreground = System.Windows.Media.Brushes.White, IsChecked = _app.CurrentSettings.CameraSize == "1280x720" };
-            _rbCam4K.Checked += async (s, e) => { _app.CurrentSettings.CameraSize = "3840x2160"; _app.CurrentSettings.Save(); if (_app.IsCameraRunning) await _app.StartCameraAsync(); };
-            _rbCam1080P.Checked += async (s, e) => { _app.CurrentSettings.CameraSize = "1920x1080"; _app.CurrentSettings.Save(); if (_app.IsCameraRunning) await _app.StartCameraAsync(); };
-            _rbCam720P.Checked += async (s, e) => { _app.CurrentSettings.CameraSize = "1280x720"; _app.CurrentSettings.Save(); if (_app.IsCameraRunning) await _app.StartCameraAsync(); };
-            resGroup.Children.Add(_rbCam4K);
-            resGroup.Children.Add(_rbCam1080P);
-            resGroup.Children.Add(_rbCam720P);
-            resRow.Children.Add(resGroup);
-            _cameraDetailsPanel.Children.Add(resRow);
-
-            // FPS and Always On Top row
-            var extraRow = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
-            var tbFps = new TextBlock { Text = "帧率:", FontSize = 10.5, Foreground = new SolidColorBrush(Color.FromArgb(180, 200, 210, 225)), Width = 34, VerticalAlignment = VerticalAlignment.Center };
-            DockPanel.SetDock(tbFps, Dock.Left);
-            extraRow.Children.Add(tbFps);
-
-            var extraGroup = new StackPanel { Orientation = Orientation.Horizontal };
-            _rbCam60Fps = new RadioButton { Content = "60 FPS", GroupName = "CamFps", FontSize = 10.5, Foreground = System.Windows.Media.Brushes.White, Margin = new Thickness(0, 0, 10, 0), IsChecked = _app.CurrentSettings.CameraFps == 60 };
-            _rbCam30Fps = new RadioButton { Content = "30 FPS", GroupName = "CamFps", FontSize = 10.5, Foreground = System.Windows.Media.Brushes.White, Margin = new Thickness(0, 0, 12, 0), IsChecked = _app.CurrentSettings.CameraFps == 30 };
-            _rbCam60Fps.Checked += async (s, e) => { _app.CurrentSettings.CameraFps = 60; _app.CurrentSettings.Save(); if (_app.IsCameraRunning) await _app.StartCameraAsync(); };
-            _rbCam30Fps.Checked += async (s, e) => { _app.CurrentSettings.CameraFps = 30; _app.CurrentSettings.Save(); if (_app.IsCameraRunning) await _app.StartCameraAsync(); };
-            extraGroup.Children.Add(_rbCam60Fps);
-            extraGroup.Children.Add(_rbCam30Fps);
-
-            _cbCamAlwaysOnTop = new CheckBox
-            {
-                Content = "📌 画面置顶",
-                FontSize = 10.5,
-                FontFamily = new FontFamily("Segoe UI Emoji, Microsoft YaHei UI"),
-                Foreground = System.Windows.Media.Brushes.White,
-                IsChecked = _app.CurrentSettings.CameraAlwaysOnTop
-            };
-            _cbCamAlwaysOnTop.Checked += async (s, e) => { _app.CurrentSettings.CameraAlwaysOnTop = true; _app.CurrentSettings.Save(); if (_app.IsCameraRunning) await _app.StartCameraAsync(); };
-            _cbCamAlwaysOnTop.Unchecked += async (s, e) => { _app.CurrentSettings.CameraAlwaysOnTop = false; _app.CurrentSettings.Save(); if (_app.IsCameraRunning) await _app.StartCameraAsync(); };
-            extraGroup.Children.Add(_cbCamAlwaysOnTop);
-            extraRow.Children.Add(extraGroup);
-            _cameraDetailsPanel.Children.Add(extraRow);
-
-            // Instructions / Tips
-            var tipBorder = new Border
-            {
-                Background = new SolidColorBrush(Color.FromArgb(80, 15, 23, 42)),
-                CornerRadius = new CornerRadius(6),
-                Padding = new Thickness(8, 6, 8, 6),
-                Margin = new Thickness(0, 2, 0, 0)
-            };
-            var tbTip = new TextBlock
-            {
-                Text = "💡 会议/直播调用与快捷键：\n• 腾讯会议/微信/飞书: 在“共享屏幕/窗口”中直接选择该摄像头窗口\n• OBS/直播伴侣: 添加“窗口采集”该画面，开启虚拟摄像机全平台通用\n• 快捷键: Alt+T 开关闪光补光灯 | Alt+↑/↓ 镜头变焦 | F11 全屏",
-                FontSize = 9.5,
-                FontFamily = new FontFamily("Segoe UI Emoji, Microsoft YaHei UI"),
-                Foreground = new SolidColorBrush(Color.FromArgb(200, 148, 163, 184)),
-                LineHeight = 14
-            };
-            tipBorder.Child = tbTip;
-            _cameraDetailsPanel.Children.Add(tipBorder);
-
-            cameraPanel.Children.Add(_cameraDetailsPanel);
-
-            _cameraCard.Child = cameraPanel;
-            root.Children.Add(_cameraCard);
 
             // Output Options / Notification & General Settings Card (Directly below Camera!)
             var optsCard = new Border
@@ -6058,24 +6003,20 @@ namespace WiFiAudioConnector
                 _qualityCard.IsEnabled = isScrcpy;
                 _qualityCard.Opacity = isScrcpy ? 1.0 : 0.35;
             }
-            if (_cameraCard != null)
-            {
-                _cameraCard.IsEnabled = isScrcpy;
-                _cameraCard.Opacity = isScrcpy ? 1.0 : 0.35;
-            }
             if (_cbMutePhone != null)
             {
                 _cbMutePhone.IsEnabled = isScrcpy;
                 _cbMutePhone.Opacity = isScrcpy ? 1.0 : 0.35;
             }
-            if (_cbMicDirect != null)
+            if (_btnTriMic != null)
             {
-                _cbMicDirect.IsEnabled = isScrcpy;
-                _cbMicDirect.Opacity = isScrcpy ? 1.0 : 0.35;
+                _btnTriMic.IsEnabled = isScrcpy;
+                _btnTriMic.Opacity = isScrcpy ? 1.0 : 0.4;
             }
-            if (_tbMicTip != null)
+            if (_btnTriCamera != null)
             {
-                _tbMicTip.Opacity = isScrcpy ? 1.0 : 0.35;
+                _btnTriCamera.IsEnabled = isScrcpy;
+                _btnTriCamera.Opacity = isScrcpy ? 1.0 : 0.4;
             }
             if (_tbColon != null)
             {
@@ -6084,21 +6025,6 @@ namespace WiFiAudioConnector
             if (_tbPort != null)
             {
                 _tbPort.Visibility = (isBluetooth || isUsb) ? Visibility.Collapsed : Visibility.Visible;
-            }
-        }
-
-        private void UpdateMicTipText()
-        {
-            if (_tbMicTip == null) return;
-            string matchingMic;
-            string vRender = WindowsAudioSessionController.FindVirtualAudioRenderDevice(out matchingMic);
-            if (!string.IsNullOrEmpty(vRender))
-            {
-                _tbMicTip.Text = "🎙️ 已智能绑定: 手机麦克风设备\n💡 电脑音箱继续同步播放手机声音(不外放)，微信/游戏等语音软件录音请选: 「手机麦克风设备」";
-            }
-            else
-            {
-                _tbMicTip.Text = "🎙️ 未检测到手机麦克风驱动 (当前由电脑耳机监听播放)\n💡 电脑音箱继续同步播放手机声音(不外放)，安装虚拟驱动即可在微信/游戏内录音。";
             }
         }
 
@@ -6219,6 +6145,8 @@ namespace WiFiAudioConnector
             {
                 bool scrcpyOn = _app.IsScrcpyConnected;
                 bool btOn = _app.IsBluetoothConnected;
+                bool micOn = _app.IsMicRunning;
+                bool camOn = _app.IsCameraRunning;
 
                 if (scrcpyOn && btOn)
                 {
@@ -6228,19 +6156,20 @@ namespace WiFiAudioConnector
                 else if (scrcpyOn)
                 {
                     _statusBadge.Background = new SolidColorBrush(Color.FromArgb(200, 35, 170, 75));
-                    if (_app.CurrentSettings.MicDirectMode)
-                    {
-                        _statusText.Text = "已连接 (手机麦克风设备)";
-                    }
-                    else
-                    {
-                        _statusText.Text = _app.CurrentSettings.Codec == "raw" ? "已连接 (Raw PCM 无损)" : "已连接 (Opus)";
-                    }
+                    string extra = micOn ? " + 麦克风" : (camOn ? " + 摄像头" : "");
+                    string codecStr = _app.CurrentSettings.Codec == "raw" ? "Raw PCM 无损" : "Opus";
+                    _statusText.Text = string.Format("已连接 ({0}{1})", codecStr, extra);
                 }
                 else if (btOn)
                 {
                     _statusBadge.Background = new SolidColorBrush(Color.FromArgb(200, 35, 170, 75));
                     _statusText.Text = string.Format("已连接 (蓝牙 A2DP: {0})", _app.CurrentBtDeviceName ?? "设备");
+                }
+                else if (micOn || camOn)
+                {
+                    _statusBadge.Background = new SolidColorBrush(Color.FromArgb(200, 35, 170, 75));
+                    string modes = (micOn && camOn) ? "麦克风 + 摄像头" : (micOn ? "麦克风直连" : "无线摄像头");
+                    _statusText.Text = string.Format("已开启 ({0})", modes);
                 }
                 else
                 {
@@ -6294,6 +6223,8 @@ namespace WiFiAudioConnector
                     }
                     catch { }
                 }
+
+                UpdateTriButtonStates();
             };
 
             if (CheckAccess()) act();
@@ -6586,17 +6517,89 @@ namespace WiFiAudioConnector
         {
             Action act = () =>
             {
-                if (_btnCameraToggle != null)
+                UpdateTriButtonStates();
+            };
+            if (CheckAccess()) act();
+            else Dispatcher.BeginInvoke(act);
+        }
+
+        public void UpdateTriButtonStates()
+        {
+            Action act = () =>
+            {
+                bool audioOn = _app.IsScrcpyConnected || _app.IsBluetoothConnected;
+                bool micOn = _app.IsMicRunning;
+                bool camOn = _app.IsCameraRunning;
+
+                // 1. Audio Button
+                if (_btnTriAudio != null)
                 {
-                    _btnCameraToggle.Content = isRunning ? "⏹ 关闭无线摄像头" : "🚀 开启 4K 无线摄像头 (独立悬浮监看/直播)";
-                    _btnCameraToggle.Background = isRunning ? new SolidColorBrush(Color.FromArgb(220, 215, 60, 60)) : new SolidColorBrush(Color.FromArgb(230, 14, 165, 233));
+                    if (audioOn)
+                    {
+                        _btnTriAudio.Content = "🔊 音频已开";
+                        _btnTriAudio.Background = new SolidColorBrush(Color.FromArgb(235, 37, 99, 235)); // #2563EB Vibrant Blue
+                        _btnTriAudio.Foreground = System.Windows.Media.Brushes.White;
+                        _btnTriAudio.FontWeight = FontWeights.Bold;
+                    }
+                    else
+                    {
+                        _btnTriAudio.Content = "🔊 音频推流";
+                        _btnTriAudio.Background = new SolidColorBrush(Color.FromArgb(160, 48, 52, 65)); // Neutral Dark Slate
+                        _btnTriAudio.Foreground = new SolidColorBrush(Color.FromArgb(220, 209, 213, 219));
+                        _btnTriAudio.FontWeight = FontWeights.Normal;
+                    }
                 }
-                if (_tbCameraStatus != null)
+
+                // 2. Microphone Button
+                if (_btnTriMic != null)
                 {
-                    _tbCameraStatus.Text = isRunning ? "🟢 4K 运行中" : "未开启";
-                    _tbCameraStatus.Foreground = isRunning ? new SolidColorBrush(Color.FromArgb(255, 34, 197, 94)) : new SolidColorBrush(Color.FromArgb(160, 148, 163, 184));
+                    if (micOn)
+                    {
+                        _btnTriMic.Content = "🎙️ 麦克风已开";
+                        _btnTriMic.Background = new SolidColorBrush(Color.FromArgb(235, 16, 185, 129)); // #10B981 Emerald Green
+                        _btnTriMic.Foreground = System.Windows.Media.Brushes.White;
+                        _btnTriMic.FontWeight = FontWeights.Bold;
+                    }
+                    else
+                    {
+                        _btnTriMic.Content = "🎙️ 麦克风直连";
+                        _btnTriMic.Background = new SolidColorBrush(Color.FromArgb(160, 48, 52, 65));
+                        _btnTriMic.Foreground = new SolidColorBrush(Color.FromArgb(220, 209, 213, 219));
+                        _btnTriMic.FontWeight = FontWeights.Normal;
+                    }
+
+                    string matchingMic;
+                    string vRender = WindowsAudioSessionController.FindVirtualAudioRenderDevice(out matchingMic);
+                    if (!string.IsNullOrEmpty(vRender))
+                    {
+                        _btnTriMic.ToolTip = "点击开启/关闭手机麦克风直连电脑\n驱动已智能绑定: 手机麦克风设备\n开黑/会议录音输入请选: 「手机麦克风设备」";
+                    }
+                    else
+                    {
+                        _btnTriMic.ToolTip = "点击开启/关闭手机麦克风直连电脑\n未检测到手机麦克风驱动 (当前由电脑耳机监听播放)\n安装虚拟驱动即可在微信/会议/游戏内直接录音";
+                    }
+                }
+
+                // 3. Camera Button
+                if (_btnTriCamera != null)
+                {
+                    if (camOn)
+                    {
+                        _btnTriCamera.Content = "📷 摄像头已开";
+                        _btnTriCamera.Background = new SolidColorBrush(Color.FromArgb(235, 147, 51, 234)); // #9333EA Purple
+                        _btnTriCamera.Foreground = System.Windows.Media.Brushes.White;
+                        _btnTriCamera.FontWeight = FontWeights.Bold;
+                    }
+                    else
+                    {
+                        _btnTriCamera.Content = "📷 无线摄像头";
+                        _btnTriCamera.Background = new SolidColorBrush(Color.FromArgb(160, 48, 52, 65));
+                        _btnTriCamera.Foreground = new SolidColorBrush(Color.FromArgb(220, 209, 213, 219));
+                        _btnTriCamera.FontWeight = FontWeights.Normal;
+                    }
                 }
             };
+
             if (CheckAccess()) act();
             else Dispatcher.BeginInvoke(act);
         }
