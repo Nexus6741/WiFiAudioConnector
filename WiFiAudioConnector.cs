@@ -7446,7 +7446,7 @@ namespace WiFiAudioConnector
                 Margin = new Thickness(0, 0, 0, 6)
             };
             var lensSegGrid = new System.Windows.Controls.Primitives.UniformGrid { Rows = 1, Columns = 2 };
-            _btnCamFacingBack = CreateCameraSegmentButton("后置主摄 (推荐)");
+            _btnCamFacingBack = CreateCameraSegmentButton("后置主摄");
             _btnCamFacingFront = CreateCameraSegmentButton("前置自拍");
             _btnCamFacingBack.Click += async (s, e) =>
             {
