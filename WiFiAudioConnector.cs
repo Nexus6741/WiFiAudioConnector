@@ -40,6 +40,11 @@ using System.Windows.Interop;
 using System.Windows.Media.Animation;
 using System.Windows.Threading;
 using LinearGradientBrush = System.Windows.Media.LinearGradientBrush;
+using System.Collections.Concurrent;
+using System.Linq;
+using System.Net;
+using System.Net.Sockets;
+using System.Net.NetworkInformation;
 
 namespace WiFiAudioConnector
 {
@@ -1372,12 +1377,310 @@ namespace WiFiAudioConnector
     }
     #endregion
 
+    #region AdbLanScanner
+    public static class AdbLanScanner
+    {
+        public static string LastScannedSubnet { get; private set; }
+        public static DateTime LastScanTime { get; private set; }
+
+        public static bool IsRfc1918(string ip)
+        {
+            if (string.IsNullOrEmpty(ip)) return false;
+            var parts = ip.Split('.');
+            if (parts.Length != 4) return false;
+            int b0, b1;
+            if (!int.TryParse(parts[0], out b0) || !int.TryParse(parts[1], out b1)) return false;
+            if (b0 == 10) return true;
+            if (b0 == 172 && (b1 >= 16 && b1 <= 31)) return true;
+            if (b0 == 192 && b1 == 168) return true;
+            return false;
+        }
+
+        public static string GetPrimaryLocalIPv4()
+        {
+            string bestIp = null;
+            int bestScore = -1;
+
+            try
+            {
+                foreach (var ni in NetworkInterface.GetAllNetworkInterfaces())
+                {
+                    if (ni.OperationalStatus != OperationalStatus.Up) continue;
+                    if (ni.NetworkInterfaceType == NetworkInterfaceType.Loopback) continue;
+                    string name = (ni.Name + " " + ni.Description).ToLower();
+
+                    bool isVirtual = name.Contains("vethernet") || name.Contains("wsl") || name.Contains("hyper-v") ||
+                                     name.Contains("vmware") || name.Contains("virtual") || name.Contains("bluetooth") ||
+                                     name.Contains("tap") || name.Contains("vpn") || name.Contains("tailscale") ||
+                                     name.Contains("zerotier") || name.Contains("clash") || name.Contains("meta") ||
+                                     name.Contains("npcap") || name.Contains("docker");
+
+                    var ipProps = ni.GetIPProperties();
+                    bool hasGateway = ipProps.GatewayAddresses != null && ipProps.GatewayAddresses.Count > 0;
+
+                    foreach (var addr in ipProps.UnicastAddresses)
+                    {
+                        if (addr.Address.AddressFamily != AddressFamily.InterNetwork) continue;
+                        string ip = addr.Address.ToString();
+                        if (ip.StartsWith("127.") || ip.StartsWith("169.254.")) continue;
+
+                        int score = 0;
+                        if (IsRfc1918(ip)) score += 10;
+                        if (hasGateway) score += 8;
+                        if (!isVirtual) score += 4;
+                        if (ni.NetworkInterfaceType == NetworkInterfaceType.Wireless80211 || ni.NetworkInterfaceType == NetworkInterfaceType.Ethernet) score += 2;
+
+                        if (score > bestScore)
+                        {
+                            bestScore = score;
+                            bestIp = ip;
+                        }
+                    }
+                }
+            }
+            catch { }
+
+            // Fallback UDP probe if interface iteration found nothing
+            if (string.IsNullOrEmpty(bestIp))
+            {
+                string[] probeHosts = new string[] { "223.5.5.5", "114.114.114.114", "8.8.8.8" };
+                foreach (var host in probeHosts)
+                {
+                    try
+                    {
+                        using (var s = new Socket(AddressFamily.InterNetwork, SocketType.Dgram, ProtocolType.Udp))
+                        {
+                            s.Connect(host, 80);
+                            string ip = ((IPEndPoint)s.LocalEndPoint).Address.ToString();
+                            if (!string.IsNullOrEmpty(ip) && !ip.StartsWith("127."))
+                            {
+                                bestIp = ip;
+                                break;
+                            }
+                        }
+                    }
+                    catch { }
+                }
+            }
+            return bestIp;
+        }
+
+        public static Dictionary<string, string> ParseArpTable()
+        {
+            var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = "arp",
+                    Arguments = "-a",
+                    CreateNoWindow = true,
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    WindowStyle = ProcessWindowStyle.Hidden
+                };
+                using (var p = Process.Start(psi))
+                {
+                    string text = p.StandardOutput.ReadToEnd();
+                    p.WaitForExit(1200);
+                    var reg = new Regex(@"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})\s+([0-9a-fA-F:-]{11,17})");
+                    foreach (Match m in reg.Matches(text))
+                    {
+                        string ip = m.Groups[1].Value;
+                        string mac = m.Groups[2].Value.Replace(':', '-').ToUpperInvariant();
+                        if (IsValidMac(mac))
+                        {
+                            map[ip] = mac;
+                        }
+                    }
+                }
+            }
+            catch { }
+            return map;
+        }
+
+        public static bool IsValidMac(string mac)
+        {
+            if (string.IsNullOrEmpty(mac)) return false;
+            if (mac == "00-00-00-00-00-00" || mac == "FF-FF-FF-FF-FF-FF") return false;
+            return true;
+        }
+
+        public static List<string> QueryMdnsServices(string adbPath)
+        {
+            var list = new List<string>();
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = adbPath,
+                    Arguments = "mdns services",
+                    CreateNoWindow = true,
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    WindowStyle = ProcessWindowStyle.Hidden
+                };
+                using (var p = Process.Start(psi))
+                {
+                    string outStr = p.StandardOutput.ReadToEnd();
+                    p.WaitForExit(1500);
+                    var reg = new Regex(@"(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}):(\d+)");
+                    foreach (Match m in reg.Matches(outStr))
+                    {
+                        string target = m.Groups[1].Value + ":" + m.Groups[2].Value;
+                        if (!list.Contains(target)) list.Add(target);
+                    }
+                }
+            }
+            catch { }
+            return list;
+        }
+
+        public static void DisconnectOfflineDevices(string adbPath)
+        {
+            try
+            {
+                var psi = new ProcessStartInfo
+                {
+                    FileName = adbPath,
+                    Arguments = "devices",
+                    CreateNoWindow = true,
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    WindowStyle = ProcessWindowStyle.Hidden
+                };
+                using (var p = Process.Start(psi))
+                {
+                    string output = p.StandardOutput.ReadToEnd();
+                    p.WaitForExit(1500);
+                    var lines = output.Split(new char[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries);
+                    foreach (var line in lines)
+                    {
+                        var parts = line.Split(new char[] { ' ', '\t' }, StringSplitOptions.RemoveEmptyEntries);
+                        if (parts.Length >= 2 && parts[1] == "offline")
+                        {
+                            string target = parts[0];
+                            if (target.Contains(":"))
+                            {
+                                try
+                                {
+                                    using (var discP = Process.Start(new ProcessStartInfo
+                                    {
+                                        FileName = adbPath,
+                                        Arguments = "disconnect " + target,
+                                        CreateNoWindow = true,
+                                        UseShellExecute = false,
+                                        WindowStyle = ProcessWindowStyle.Hidden
+                                    }))
+                                    {
+                                        discP.WaitForExit(1000);
+                                    }
+                                }
+                                catch { }
+                            }
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+
+        public static bool ProbeTcpPort(string ip, int port, int timeoutMs)
+        {
+            using (var sock = new Socket(AddressFamily.InterNetwork, SocketType.Stream, ProtocolType.Tcp))
+            {
+                try
+                {
+                    var ar = sock.BeginConnect(ip, port, null, null);
+                    if (ar.AsyncWaitHandle.WaitOne(timeoutMs, false))
+                    {
+                        sock.EndConnect(ar);
+                        return sock.Connected;
+                    }
+                }
+                catch { }
+                return false;
+            }
+        }
+
+        public static async Task<List<string>> DiscoverLanTargetsAsync(string adbPath, List<int> scanPorts, int timeoutMs = 200, int maxConcurrency = 128)
+        {
+            return await Task.Run(() =>
+            {
+                var results = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+                // 1. Clean up dead/offline devices in ADB daemon
+                DisconnectOfflineDevices(adbPath);
+
+                // 2. Query mDNS services in background (finds Android 11+ dynamic ports!)
+                var mdnsTask = Task.Run(() => QueryMdnsServices(adbPath));
+
+                // 3. Parallel TCP subnet scan
+                string localIp = GetPrimaryLocalIPv4();
+                if (!string.IsNullOrEmpty(localIp))
+                {
+                    int lastDot = localIp.LastIndexOf('.');
+                    if (lastDot > 0)
+                    {
+                        string prefix = localIp.Substring(0, lastDot);
+                        LastScannedSubnet = prefix + ".1 ~ 254";
+
+                        var arpMap = ParseArpTable();
+                        var activePorts = (scanPorts != null && scanPorts.Count > 0) ? new List<int>(scanPorts) : new List<int> { 5555 };
+                        if (!activePorts.Contains(5555)) activePorts.Insert(0, 5555);
+
+                        var bag = new ConcurrentBag<string>();
+                        foreach (var port in activePorts)
+                        {
+                            Parallel.For(1, 255, new ParallelOptions { MaxDegreeOfParallelism = maxConcurrency }, i =>
+                            {
+                                string ip = prefix + "." + i;
+                                if (ip == localIp) return;
+                                if (ProbeTcpPort(ip, port, timeoutMs))
+                                {
+                                    // Cross-check against ARP table to eliminate virtual/TUN proxies (Clash, WSL, etc.)
+                                    if (arpMap.Count == 0 || arpMap.ContainsKey(ip))
+                                    {
+                                        bag.Add(ip + ":" + port);
+                                    }
+                                }
+                            });
+                        }
+
+                        foreach (var item in bag)
+                        {
+                            results.Add(item);
+                        }
+                    }
+                }
+
+                // 4. Merge mDNS targets
+                try
+                {
+                    if (mdnsTask.Wait(1500))
+                    {
+                        foreach (var target in mdnsTask.Result)
+                        {
+                            results.Add(target);
+                        }
+                    }
+                }
+                catch { }
+
+                LastScanTime = DateTime.Now;
+                return results.ToList();
+            });
+        }
+    }
+    #endregion
+
     public class Settings
     {
-        public string DeviceName = "Xiaomi 15 Pro";
-        public string DeviceIp = "192.168.31.239";
+        public string DeviceName = "安卓手机";
+        public string DeviceIp = "";
         public int Port = 5555;
-        public string Target = "192.168.31.239:5555";
+        public string Target = "";
+        public string ScanPorts = "5555";
         public string Codec = "raw"; // "raw", "opus320", "opus128"
         public string LatencyMode = "balanced"; // "game", "balanced", "smooth"
         public bool MutePhone = true;
@@ -1436,6 +1739,7 @@ namespace WiFiAudioConnector
                 sb.AppendLine("HotkeyEnabled=" + (HotkeyEnabled ? "1" : "0"));
                 sb.AppendLine("HotkeyModifiers=" + (int)HotkeyModifiers);
                 sb.AppendLine("HotkeyKey=" + (int)HotkeyKey);
+                sb.AppendLine("ScanPorts=" + ScanPorts);
 
                 foreach (var kvp in DeviceHotkeys)
                 {
@@ -1499,6 +1803,7 @@ namespace WiFiAudioConnector
                             else if (k == "HotkeyEnabled") s.HotkeyEnabled = (v == "1");
                             else if (k == "HotkeyModifiers") { int m; if (int.TryParse(v, out m)) s.HotkeyModifiers = (ModifierKeys)m; }
                             else if (k == "HotkeyKey") { int kCode; if (int.TryParse(v, out kCode)) s.HotkeyKey = (Key)kCode; }
+                            else if (k == "ScanPorts") s.ScanPorts = v;
                             else if (k == "DeviceHotkey")
                             {
                                 var segs = v.Split('|');
@@ -1528,8 +1833,8 @@ namespace WiFiAudioConnector
 
             if (s.Target == "Bluetooth A2DP:5555" || s.Target == "Bluetooth A2DP" || s.DeviceIp == "Bluetooth A2DP")
             {
-                s.Target = "192.168.31.239:5555";
-                s.DeviceIp = "192.168.31.239";
+                s.Target = "";
+                s.DeviceIp = "";
                 s.Port = 5555;
             }
             if (s.DeviceHotkeys.ContainsKey("Bluetooth A2DP:5555"))
@@ -1545,28 +1850,54 @@ namespace WiFiAudioConnector
             return s;
         }
 
+        public List<int> GetScanPortsList()
+        {
+            var list = new List<int> { 5555 };
+            if (!string.IsNullOrEmpty(ScanPorts))
+            {
+                var parts = ScanPorts.Split(new char[] { ',', ';', ' ', '|' }, StringSplitOptions.RemoveEmptyEntries);
+                foreach (var p in parts)
+                {
+                    int port;
+                    if (int.TryParse(p.Trim(), out port) && port > 0 && port <= 65535)
+                    {
+                        if (!list.Contains(port)) list.Add(port);
+                    }
+                }
+            }
+            if (Port > 0 && Port <= 65535 && !list.Contains(Port))
+            {
+                list.Add(Port);
+            }
+            return list;
+        }
+
+        public void AddScanPort(int port)
+        {
+            if (port <= 0 || port > 65535) return;
+            var list = GetScanPortsList();
+            if (!list.Contains(port))
+            {
+                list.Add(port);
+                ScanPorts = string.Join(",", list);
+                Save();
+            }
+        }
+
         public void SeedDefaultHotkeys()
         {
-            string wifiTarget = string.IsNullOrEmpty(DeviceIp) ? "192.168.31.239:5555" : string.Format("{0}:{1}", DeviceIp, Port);
-            DeviceHotkeys[wifiTarget] = new DeviceHotkeyBinding
+            if (!string.IsNullOrEmpty(Target))
             {
-                Target = wifiTarget,
-                DeviceName = DeviceName,
-                IsUsb = false,
-                Modifiers = ModifierKeys.Control | ModifierKeys.Shift,
-                Key = Key.W,
-                Enabled = true
-            };
-
-            DeviceHotkeys["a22280af"] = new DeviceHotkeyBinding
-            {
-                Target = "a22280af",
-                DeviceName = DeviceName,
-                IsUsb = true,
-                Modifiers = ModifierKeys.Control | ModifierKeys.Shift,
-                Key = Key.U,
-                Enabled = true
-            };
+                DeviceHotkeys[Target] = new DeviceHotkeyBinding
+                {
+                    Target = Target,
+                    DeviceName = DeviceName,
+                    IsUsb = !Target.Contains(":"),
+                    Modifiers = ModifierKeys.Control | ModifierKeys.Shift,
+                    Key = Key.W,
+                    Enabled = true
+                };
+            }
         }
     }
 
@@ -2782,6 +3113,38 @@ namespace WiFiAudioConnector
             var list = new List<DeviceItem>();
             string adbPath = FindToolPath("adb.exe");
 
+            // 1. Run dynamic LAN scanner (Subnet parallel TCP scan + ARP validation + mDNS discovery)
+            var scanPorts = _settings.GetScanPortsList();
+            var lanTargets = await AdbLanScanner.DiscoverLanTargetsAsync(adbPath, scanPorts);
+
+            // 2. Connect to newly discovered LAN targets
+            if (lanTargets != null && lanTargets.Count > 0)
+            {
+                await Task.Run(() =>
+                {
+                    foreach (var target in lanTargets)
+                    {
+                        try
+                        {
+                            var psiConn = new ProcessStartInfo
+                            {
+                                FileName = adbPath,
+                                Arguments = "connect " + target,
+                                CreateNoWindow = true,
+                                UseShellExecute = false,
+                                WindowStyle = ProcessWindowStyle.Hidden
+                            };
+                            using (var p = Process.Start(psiConn))
+                            {
+                                p.WaitForExit(1500);
+                            }
+                        }
+                        catch { }
+                    }
+                });
+            }
+
+            // 3. Enumerate ADB devices (USB + connected TCP)
             var adbTask = Task.Run(() =>
             {
                 var adbList = new List<DeviceItem>();
@@ -2884,6 +3247,40 @@ namespace WiFiAudioConnector
             }
 
             LastDiscoveredDevices = new List<DeviceItem>(list);
+
+            // 4. Smart Target Migration:
+            // If current settings target was a Wi-Fi device that was NOT found,
+            // but an active Wi-Fi device was discovered on the LAN:
+            var wifiDevices = list.Where(d => !d.IsBluetooth && !d.IsUsb).ToList();
+            bool currentTargetFound = list.Any(d => string.Equals(d.Target, _settings.Target, StringComparison.OrdinalIgnoreCase));
+            if (!currentTargetFound && !string.IsNullOrEmpty(_settings.Target) && _settings.Target.Contains(":") && wifiDevices.Count > 0)
+            {
+                var matched = wifiDevices.FirstOrDefault(d => string.Equals(d.Name, _settings.DeviceName, StringComparison.OrdinalIgnoreCase));
+                if (matched == null && wifiDevices.Count == 1)
+                {
+                    matched = wifiDevices[0];
+                }
+
+                if (matched != null)
+                {
+                    LogLine(string.Format("检测到局域网设备 IP 变动: {0} -> {1}", _settings.Target, matched.Target));
+                    _settings.Target = matched.Target;
+                    _settings.DeviceIp = matched.Ip;
+                    _settings.Port = matched.Port;
+                    _settings.DeviceName = matched.Name;
+                    _settings.Save();
+                }
+            }
+
+            if (string.IsNullOrEmpty(_settings.Target) && list.Count > 0)
+            {
+                var firstDev = list.FirstOrDefault(d => !d.IsBluetooth) ?? list[0];
+                _settings.Target = firstDev.Target;
+                _settings.DeviceIp = firstDev.Ip;
+                _settings.Port = firstDev.Port;
+                _settings.DeviceName = firstDev.Name;
+                _settings.Save();
+            }
 
             // Ensure newly discovered devices exist in settings hotkeys dictionary
             bool modified = false;
@@ -5427,9 +5824,9 @@ namespace WiFiAudioConnector
             if (!hasCurrent && !string.IsNullOrEmpty(_app.CurrentSettings.Target))
             {
                 bool isBtTarget = _app.CurrentSettings.Target.StartsWith(@"\\?\BTHENUM", StringComparison.OrdinalIgnoreCase) || _app.CurrentSettings.Target.StartsWith("Bluetooth#", StringComparison.OrdinalIgnoreCase);
-                _deviceList.Insert(0, new DeviceItem
+                _deviceList.Add(new DeviceItem
                 {
-                    Name = _app.CurrentSettings.DeviceName,
+                    Name = _app.CurrentSettings.DeviceName + " (离线)",
                     Target = _app.CurrentSettings.Target,
                     Ip = isBtTarget ? "" : _app.CurrentSettings.DeviceIp,
                     Port = isBtTarget ? 0 : _app.CurrentSettings.Port,
@@ -5454,7 +5851,7 @@ namespace WiFiAudioConnector
             _cbDevices.ItemsSource = _deviceList;
 
             // Select active device
-            int selIdx = 0;
+            int selIdx = -1;
             for (int i = 0; i < _deviceList.Count; i++)
             {
                 if (_deviceList[i].Target == _app.CurrentSettings.Target)
@@ -5463,7 +5860,20 @@ namespace WiFiAudioConnector
                     break;
                 }
             }
-            _cbDevices.SelectedIndex = selIdx;
+            if (selIdx < 0 && _deviceList.Count > 0)
+            {
+                // Prefer first online device (not custom, not offline)
+                for (int i = 0; i < _deviceList.Count; i++)
+                {
+                    if (!_deviceList[i].IsCustom && !_deviceList[i].Name.Contains("(离线)"))
+                    {
+                        selIdx = i;
+                        break;
+                    }
+                }
+                if (selIdx < 0) selIdx = 0;
+            }
+            _cbDevices.SelectedIndex = Math.Max(0, selIdx);
             var curSel = _cbDevices.SelectedItem as DeviceItem;
             if (curSel != null)
             {
@@ -5473,6 +5883,10 @@ namespace WiFiAudioConnector
 
             _btnScan.IsEnabled = true;
             _btnScan.Content = "🔄 扫描";
+            _btnScan.ToolTip = string.Format("上次扫描: 发现 {0} 台设备\n局域网网段: {1}\n扫描端口: {2}",
+                discovered.Count,
+                AdbLanScanner.LastScannedSubnet ?? "未检测到",
+                string.Join(", ", _app.CurrentSettings.GetScanPortsList()));
         }
 
         public void UpdateScrcpyControlsState(bool isBluetooth, bool isUsb)
