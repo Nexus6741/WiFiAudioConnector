@@ -2715,6 +2715,7 @@ namespace WiFiAudioConnector
         private Thread _pumpThread = null;
         private volatile bool _isRunning = false;
         private volatile bool _stopping = false;
+        private volatile bool _mirror = false;
 
         private Mutex _mutex = null;
         private EventWaitHandle _eventSent = null;
@@ -2725,6 +2726,29 @@ namespace WiFiAudioConnector
         public event Action OnStopped;
 
         public bool IsRunning { get { return _isRunning && _scrcpyProc != null && !_scrcpyProc.HasExited; } }
+
+        public void UpdateMirror(bool mirror)
+        {
+            _mirror = mirror;
+            if (_accessor != null && _mutex != null)
+            {
+                try
+                {
+                    if (_mutex.WaitOne(50))
+                    {
+                        try
+                        {
+                            _accessor.Write(24, mirror ? 1 : 0);
+                        }
+                        finally
+                        {
+                            _mutex.ReleaseMutex();
+                        }
+                    }
+                }
+                catch { }
+            }
+        }
 
         public static bool IsDriverInstalled()
         {
@@ -2821,6 +2845,55 @@ namespace WiFiAudioConnector
 
         private const uint PW_RENDERFULLCONTENT = 2;
 
+        private void EnsureSharedMemory(int width, int height, bool mirror)
+        {
+            if (_accessor != null && _mmf != null && _mutex != null)
+            {
+                _mutex.WaitOne();
+                try
+                {
+                    _accessor.Write(0, (uint)MAX_SHARED_IMAGE_SIZE);
+                    _accessor.Write(4, width);
+                    _accessor.Write(8, height);
+                    _accessor.Write(12, width);
+                    _accessor.Write(16, 0); // FORMAT_UINT8 (RGBA)
+                    _accessor.Write(20, 1); // RESIZEMODE_LINEAR
+                    _accessor.Write(24, mirror ? 1 : 0);
+                    _accessor.Write(28, 1000);
+                }
+                finally
+                {
+                    _mutex.ReleaseMutex();
+                }
+                return;
+            }
+
+            int totalSize = HEADER_SIZE + MAX_SHARED_IMAGE_SIZE;
+            bool createdNew;
+            _mutex = new Mutex(false, MUTEX_NAME, out createdNew);
+            _eventSent = new EventWaitHandle(false, EventResetMode.AutoReset, EVENT_SENT_NAME);
+            _eventWant = new EventWaitHandle(false, EventResetMode.AutoReset, EVENT_WANT_NAME);
+            _mmf = MemoryMappedFile.CreateOrOpen(MEM_NAME, totalSize, MemoryMappedFileAccess.ReadWrite);
+            _accessor = _mmf.CreateViewAccessor(0, totalSize, MemoryMappedFileAccess.ReadWrite);
+
+            _mutex.WaitOne();
+            try
+            {
+                _accessor.Write(0, (uint)MAX_SHARED_IMAGE_SIZE);
+                _accessor.Write(4, width);
+                _accessor.Write(8, height);
+                _accessor.Write(12, width);
+                _accessor.Write(16, 0);
+                _accessor.Write(20, 1);
+                _accessor.Write(24, mirror ? 1 : 0);
+                _accessor.Write(28, 1000);
+            }
+            finally
+            {
+                _mutex.ReleaseMutex();
+            }
+        }
+
         public bool Start(string target, string scrcpyPath, string ffmpegPath, string facing, string size, int fps, bool showPreview, bool alwaysOnTop)
         {
             return Start(target, scrcpyPath, ffmpegPath, facing, size, fps, 0, false, showPreview, alwaysOnTop);
@@ -2830,6 +2903,7 @@ namespace WiFiAudioConnector
         {
             Stop();
             _stopping = false;
+            _mirror = mirror;
 
             int width = 1920;
             int height = 1080;
@@ -2860,37 +2934,13 @@ namespace WiFiAudioConnector
             try
             {
                 // 1. Initialize Shared Memory
-                int totalSize = HEADER_SIZE + MAX_SHARED_IMAGE_SIZE;
-                bool createdNew;
-                _mutex = new Mutex(false, MUTEX_NAME, out createdNew);
-                _eventSent = new EventWaitHandle(false, EventResetMode.AutoReset, EVENT_SENT_NAME);
-                _eventWant = new EventWaitHandle(false, EventResetMode.AutoReset, EVENT_WANT_NAME);
-                _mmf = MemoryMappedFile.CreateOrOpen(MEM_NAME, totalSize, MemoryMappedFileAccess.ReadWrite);
-                _accessor = _mmf.CreateViewAccessor(0, totalSize, MemoryMappedFileAccess.ReadWrite);
-
-                _mutex.WaitOne();
-                try
-                {
-                    _accessor.Write(0, (uint)MAX_SHARED_IMAGE_SIZE);
-                    _accessor.Write(4, width);
-                    _accessor.Write(8, height);
-                    _accessor.Write(12, width); // NOTE: stride is width in pixels!
-                    _accessor.Write(16, 0); // FORMAT_UINT8 (RGBA)
-                    _accessor.Write(20, 1); // RESIZEMODE_LINEAR
-                    _accessor.Write(24, mirror ? 1 : 0); // MIRRORMODE_HORIZONTALLY
-                    _accessor.Write(28, 1000); // timeout ms
-                }
-                finally
-                {
-                    _mutex.ReleaseMutex();
-                }
+                EnsureSharedMemory(width, height, mirror);
 
                 // 2. Launch Scrcpy
                 string windowTitle = "WiFiAudioCam";
                 string windowArgs;
                 if (!showPreview)
                 {
-                    // Completely hidden off-screen, zero borders
                     windowArgs = string.Format("--window-borderless --window-title={0} --window-x=-32000 --window-y=-32000 --window-width={1} --window-height={2}",
                         windowTitle, winW, winH);
                 }
@@ -2914,6 +2964,12 @@ namespace WiFiAudioConnector
                 };
 
                 _scrcpyProc = Process.Start(psiScrcpy);
+                if (_scrcpyProc == null || _scrcpyProc.HasExited)
+                {
+                    Thread.Sleep(600);
+                    _scrcpyProc = Process.Start(psiScrcpy);
+                }
+
                 if (_scrcpyProc == null || _scrcpyProc.HasExited)
                 {
                     App.LogLine("Scrcpy failed to start with arguments: " + scrcpyArgs);
@@ -2948,7 +3004,7 @@ namespace WiFiAudioConnector
                 // 4. Start high-performance native frame pump thread using PrintWindow PW_RENDERFULLCONTENT
                 _pumpThread = new Thread(() =>
                 {
-                    PumpLoop(hwnd, winW, winH, width, height, fps, mirror);
+                    PumpLoop(hwnd, winW, winH, width, height, fps);
                 });
                 _pumpThread.IsBackground = true;
                 _pumpThread.Priority = ThreadPriority.AboveNormal;
@@ -2964,7 +3020,112 @@ namespace WiFiAudioConnector
             }
         }
 
-        private unsafe void PumpLoop(IntPtr hwnd, int winW, int winH, int targetW, int targetH, int fps, bool mirror)
+        public bool Restart(string target, string scrcpyPath, string ffmpegPath, string facing, string size, int fps, int orientation, bool mirror, bool showPreview, bool alwaysOnTop)
+        {
+            StopStreamOnly();
+            Thread.Sleep(700); // Allow Android Camera2 session to cleanly unbind
+            _stopping = false;
+            _mirror = mirror;
+
+            int width = 1920;
+            int height = 1080;
+            if (!string.IsNullOrEmpty(size) && size.Contains("x"))
+            {
+                var parts = size.Split('x');
+                int.TryParse(parts[0], out width);
+                int.TryParse(parts[1], out height);
+            }
+            if (width <= 0) width = 1920;
+            if (height <= 0) height = 1080;
+            if (fps <= 0) fps = 30;
+
+            int winW = width;
+            int winH = height;
+            string orientArg = "";
+            if (orientation == 90 || orientation == 270)
+            {
+                winW = height;
+                winH = width;
+                orientArg = string.Format("--capture-orientation={0}", orientation);
+            }
+            else if (orientation == 180)
+            {
+                orientArg = "--capture-orientation=180";
+            }
+
+            try
+            {
+                EnsureSharedMemory(width, height, mirror);
+
+                string windowTitle = "WiFiAudioCam";
+                string windowArgs;
+                if (!showPreview)
+                {
+                    windowArgs = string.Format("--window-borderless --window-title={0} --window-x=-32000 --window-y=-32000 --window-width={1} --window-height={2}",
+                        windowTitle, winW, winH);
+                }
+                else
+                {
+                    string topStr = alwaysOnTop ? "--always-on-top" : "";
+                    windowArgs = string.Format("--window-borderless --window-title={0} --window-width={1} --window-height={2} {3}",
+                        windowTitle, winW, winH, topStr);
+                }
+
+                string scrcpyArgs = string.Format("-s {0} --video-source=camera --camera-facing={1} --camera-size={2} --camera-fps={3} {4} --no-audio {5}",
+                    target, facing, size, fps, orientArg, windowArgs);
+
+                var psiScrcpy = new ProcessStartInfo
+                {
+                    FileName = scrcpyPath,
+                    Arguments = scrcpyArgs,
+                    CreateNoWindow = true,
+                    UseShellExecute = false,
+                    WindowStyle = ProcessWindowStyle.Normal
+                };
+
+                _scrcpyProc = Process.Start(psiScrcpy);
+                if (_scrcpyProc == null || _scrcpyProc.HasExited)
+                {
+                    Thread.Sleep(600);
+                    _scrcpyProc = Process.Start(psiScrcpy);
+                }
+
+                if (_scrcpyProc == null || _scrcpyProc.HasExited)
+                {
+                    App.LogLine("Scrcpy camera restart failed: " + scrcpyArgs);
+                    return false;
+                }
+
+                IntPtr hwnd = IntPtr.Zero;
+                for (int i = 0; i < 40; i++)
+                {
+                    Thread.Sleep(200);
+                    if (_scrcpyProc.HasExited) return false;
+                    hwnd = FindWindow(null, windowTitle);
+                    if (hwnd != IntPtr.Zero) break;
+                }
+
+                if (hwnd == IntPtr.Zero) return false;
+
+                _isRunning = true;
+                _pumpThread = new Thread(() =>
+                {
+                    PumpLoop(hwnd, winW, winH, width, height, fps);
+                });
+                _pumpThread.IsBackground = true;
+                _pumpThread.Priority = ThreadPriority.AboveNormal;
+                _pumpThread.Start();
+
+                return true;
+            }
+            catch (Exception ex)
+            {
+                App.LogLine("VirtualCamManager.Restart Exception: " + ex);
+                return false;
+            }
+        }
+
+        private unsafe void PumpLoop(IntPtr hwnd, int winW, int winH, int targetW, int targetH, int fps)
         {
             System.Drawing.Bitmap bmpWin = null;
             System.Drawing.Bitmap bmpTarget = null;
@@ -3037,13 +3198,20 @@ namespace WiFiAudioConnector
                                 _accessor.Write(12, targetW); // NOTE: stride = targetW in uint32_t pixels!
                                 _accessor.Write(16, 0); // FORMAT_UINT8 (RGBA)
                                 _accessor.Write(20, 1); // RESIZEMODE_LINEAR
-                                _accessor.Write(24, mirror ? 1 : 0); // MIRRORMODE_HORIZONTALLY
+                                _accessor.Write(24, _mirror ? 1 : 0); // MIRRORMODE_HORIZONTALLY
                                 _accessor.Write(28, 1000);
 
-                                for (int i = 0; i < totalPixels; i++)
+                                int srcStridePixels = bd.Stride / 4;
+                                // Invert Y vertically to map top-down window to DirectShow bottom-up DIB (fixes upside-down video)
+                                for (int y = 0; y < targetH; y++)
                                 {
-                                    uint c = srcPixels[i];
-                                    dstPixels[i] = (c & 0xFF00FF00) | ((c & 0x00FF0000) >> 16) | ((c & 0x000000FF) << 16);
+                                    uint* srcRow = srcPixels + y * srcStridePixels;
+                                    uint* dstRow = dstPixels + (targetH - 1 - y) * targetW;
+                                    for (int x = 0; x < targetW; x++)
+                                    {
+                                        uint c = srcRow[x];
+                                        dstRow[x] = (c & 0xFF00FF00) | ((c & 0x00FF0000) >> 16) | ((c & 0x000000FF) << 16);
+                                    }
                                 }
                             }
                             finally
@@ -3103,14 +3271,14 @@ namespace WiFiAudioConnector
             }
         }
 
-        public void Stop()
+        public void StopStreamOnly()
         {
             _stopping = true;
             _isRunning = false;
 
             if (_pumpThread != null && _pumpThread != Thread.CurrentThread)
             {
-                try { _pumpThread.Join(1000); } catch { }
+                try { _pumpThread.Join(1200); } catch { }
                 _pumpThread = null;
             }
 
@@ -3119,11 +3287,16 @@ namespace WiFiAudioConnector
                 if (_scrcpyProc != null && !_scrcpyProc.HasExited)
                 {
                     _scrcpyProc.Kill();
-                    _scrcpyProc.WaitForExit(500);
+                    _scrcpyProc.WaitForExit(800);
                 }
             }
             catch { }
             _scrcpyProc = null;
+        }
+
+        public void Stop()
+        {
+            StopStreamOnly();
 
             if (_accessor != null)
             {
@@ -3178,6 +3351,8 @@ namespace WiFiAudioConnector
         private string _currentBtDeviceName = null;
         private bool _isConnectingScrcpy = false;
         private bool _isConnectingBt = false;
+        private bool _isReloadingCamera = false;
+        public bool IsReloadingCamera { get { return _isReloadingCamera; } }
 
         public bool IsScrcpyConnected { get { return _scrcpyProc != null && !_scrcpyProc.HasExited; } }
         public bool IsCameraRunning { get { return (_vcamManager != null && _vcamManager.IsRunning) || (_cameraProc != null && !_cameraProc.HasExited); } }
@@ -4310,6 +4485,7 @@ namespace WiFiAudioConnector
             {
                 _flyout.SyncNotificationCheckbox();
                 _flyout.RefreshBatteryForSelectedDevice();
+                _flyout.UpdateCameraSegmentsUI();
             }
             _flyout.Show();
             _flyout.Activate();
@@ -5042,12 +5218,78 @@ namespace WiFiAudioConnector
             await ToggleCameraAsync();
         }
 
+        public void UpdateCameraMirror(bool mirror)
+        {
+            if (_vcamManager != null && _vcamManager.IsRunning)
+            {
+                _vcamManager.UpdateMirror(mirror);
+            }
+        }
+
+        public async Task ReloadCameraStreamAsync(string noticeTag = null)
+        {
+            if (!IsCameraRunning || _isReloadingCamera) return;
+
+            _isReloadingCamera = true;
+            try
+            {
+                if (_flyout != null)
+                {
+                    _flyout.SetCameraTogglingState("⏳ 应用新配置中...");
+                }
+
+                string target = !string.IsNullOrEmpty(_currentScrcpyTarget) ? _currentScrcpyTarget : _settings.Target;
+                string devName = !string.IsNullOrEmpty(_currentScrcpyDeviceName) ? _currentScrcpyDeviceName : _settings.DeviceName;
+                string scrcpyPath = FindToolPath("scrcpy.exe");
+                string ffmpegPath = FindToolPath("ffmpeg.exe");
+                string facing = _settings.CameraFacing ?? "back";
+                string size = _settings.CameraSize ?? "1920x1080";
+                int fps = _settings.CameraFps > 0 ? _settings.CameraFps : 30;
+
+                if (_settings.CameraVirtualDeviceMode && _vcamManager != null)
+                {
+                    bool ok = await Task.Run<bool>(() =>
+                    {
+                        return _vcamManager.Restart(target, scrcpyPath, ffmpegPath, facing, size, fps, _settings.CameraOrientation, _settings.CameraMirror, _settings.CameraShowPreviewWindow, _settings.CameraAlwaysOnTop);
+                    });
+
+                    if (ok)
+                    {
+                        ShowNotification("摄像头配置已生效", noticeTag != null ? (noticeTag + "\n新画面参数已无缝应用") : "新画面参数已无缝应用", ToolTipIcon.Info);
+                    }
+                    else
+                    {
+                        ShowNotification("摄像头重载失败", "未能重新启动摄像头画面，请检查设备连接", ToolTipIcon.Warning);
+                    }
+                }
+                else
+                {
+                    if (_cameraProc != null && !_cameraProc.HasExited)
+                    {
+                        try { _cameraProc.Kill(); _cameraProc.WaitForExit(800); } catch { }
+                        _cameraProc = null;
+                        await Task.Delay(600);
+                    }
+                    await StartCameraAsync();
+                }
+            }
+            catch (Exception ex)
+            {
+                LogLine("ReloadCameraStreamAsync Exception: " + ex);
+            }
+            finally
+            {
+                _isReloadingCamera = false;
+                UpdateCameraUI();
+            }
+        }
+
         public async Task<bool> StartCameraAsync(string specificTarget = null, string specificName = null)
         {
             if (IsCameraRunning)
             {
                 StopCamera();
-                await Task.Delay(200);
+                await Task.Delay(600);
             }
 
             var sel = (_flyout != null) ? _flyout.GetSelectedDevice() : null;
@@ -5141,7 +5383,10 @@ namespace WiFiAudioConnector
                         {
                             Dispatcher.BeginInvoke(new Action(() =>
                             {
-                                UpdateCameraUI();
+                                if (!_isReloadingCamera)
+                                {
+                                    UpdateCameraUI();
+                                }
                             }));
                         };
                     }
@@ -5482,6 +5727,19 @@ namespace WiFiAudioConnector
         private Button _btnTriAudio;
         private Button _btnTriMic;
         private Button _btnTriCamera;
+        private Border _camCard;
+        private Button _btnCamFacingBack;
+        private Button _btnCamFacingFront;
+        private Button _btnCamRes1080;
+        private Button _btnCamRes720;
+        private Button _btnCamRot0;
+        private Button _btnCamRot90;
+        private Button _btnCamRot180;
+        private Button _btnCamRot270;
+        private CheckBox _cbCamMirror;
+        private CheckBox _cbCam60Fps;
+        private CheckBox _cbCamVirtual;
+        private CheckBox _cbCamPreview;
         private CheckBox _cbAutoConnect;
         private Button _btnNotifyOsd;
         private Button _btnNotifyWin;
@@ -5523,8 +5781,8 @@ namespace WiFiAudioConnector
 
         private void BuildUI()
         {
-            Width = 380;
-            Height = Math.Min(840, Math.Max(600, SystemParameters.WorkArea.Height - 40));
+            Width = 390;
+            Height = Math.Min(880, Math.Max(640, SystemParameters.WorkArea.Height - 30));
             WindowStyle = WindowStyle.None;
             AllowsTransparency = true;
             Background = System.Windows.Media.Brushes.Transparent;
@@ -6066,7 +6324,8 @@ namespace WiFiAudioConnector
                 _app.CurrentSettings.CameraFacing = (_app.CurrentSettings.CameraFacing == "front") ? "back" : "front";
                 _app.CurrentSettings.Save();
                 itemFacing.Header = _app.CurrentSettings.CameraFacing == "front" ? "📱 镜头: 前置自拍" : "📷 镜头: 后置主摄";
-                if (_app.IsCameraRunning) await _app.StartCameraAsync();
+                UpdateCameraSegmentsUI();
+                if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换镜头");
             };
             camMenu.Items.Add(itemFacing);
 
@@ -6074,9 +6333,9 @@ namespace WiFiAudioConnector
             var r1080 = new System.Windows.Controls.MenuItem { Header = "1080P 推荐 (默认)", IsChecked = _app.CurrentSettings.CameraSize == "1920x1080" };
             var r4k = new System.Windows.Controls.MenuItem { Header = "4K 极清", IsChecked = _app.CurrentSettings.CameraSize == "3840x2160" };
             var r720 = new System.Windows.Controls.MenuItem { Header = "720P 极速", IsChecked = _app.CurrentSettings.CameraSize == "1280x720" };
-            r1080.Click += async (s, e) => { _app.CurrentSettings.CameraSize = "1920x1080"; _app.CurrentSettings.Save(); r1080.IsChecked = true; r4k.IsChecked = false; r720.IsChecked = false; if (_app.IsCameraRunning) await _app.StartCameraAsync(); };
-            r4k.Click += async (s, e) => { _app.CurrentSettings.CameraSize = "3840x2160"; _app.CurrentSettings.Save(); r4k.IsChecked = true; r1080.IsChecked = false; r720.IsChecked = false; if (_app.IsCameraRunning) await _app.StartCameraAsync(); };
-            r720.Click += async (s, e) => { _app.CurrentSettings.CameraSize = "1280x720"; _app.CurrentSettings.Save(); r720.IsChecked = true; r1080.IsChecked = false; r4k.IsChecked = false; if (_app.IsCameraRunning) await _app.StartCameraAsync(); };
+            r1080.Click += async (s, e) => { _app.CurrentSettings.CameraSize = "1920x1080"; _app.CurrentSettings.Save(); r1080.IsChecked = true; r4k.IsChecked = false; r720.IsChecked = false; UpdateCameraSegmentsUI(); if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换分辨率: 1080P 超清"); };
+            r4k.Click += async (s, e) => { _app.CurrentSettings.CameraSize = "3840x2160"; _app.CurrentSettings.Save(); r4k.IsChecked = true; r1080.IsChecked = false; r720.IsChecked = false; UpdateCameraSegmentsUI(); if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换分辨率: 4K 极清"); };
+            r720.Click += async (s, e) => { _app.CurrentSettings.CameraSize = "1280x720"; _app.CurrentSettings.Save(); r720.IsChecked = true; r1080.IsChecked = false; r4k.IsChecked = false; UpdateCameraSegmentsUI(); if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换分辨率: 720P 高清"); };
             resMenu.Items.Add(r1080);
             resMenu.Items.Add(r4k);
             resMenu.Items.Add(r720);
@@ -6085,8 +6344,8 @@ namespace WiFiAudioConnector
             var fpsMenu = new System.Windows.Controls.MenuItem { Header = "⚡ 帧率设置" };
             var fps30 = new System.Windows.Controls.MenuItem { Header = "30 FPS (默认推荐)", IsChecked = _app.CurrentSettings.CameraFps == 30 };
             var fps60 = new System.Windows.Controls.MenuItem { Header = "60 FPS 极速", IsChecked = _app.CurrentSettings.CameraFps == 60 };
-            fps30.Click += async (s, e) => { _app.CurrentSettings.CameraFps = 30; _app.CurrentSettings.Save(); fps30.IsChecked = true; fps60.IsChecked = false; if (_app.IsCameraRunning) await _app.StartCameraAsync(); };
-            fps60.Click += async (s, e) => { _app.CurrentSettings.CameraFps = 60; _app.CurrentSettings.Save(); fps60.IsChecked = true; fps30.IsChecked = false; if (_app.IsCameraRunning) await _app.StartCameraAsync(); };
+            fps30.Click += async (s, e) => { _app.CurrentSettings.CameraFps = 30; _app.CurrentSettings.Save(); fps30.IsChecked = true; fps60.IsChecked = false; UpdateCameraSegmentsUI(); if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换帧率: 30 FPS"); };
+            fps60.Click += async (s, e) => { _app.CurrentSettings.CameraFps = 60; _app.CurrentSettings.Save(); fps60.IsChecked = true; fps30.IsChecked = false; UpdateCameraSegmentsUI(); if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换帧率: 60 FPS"); };
             fpsMenu.Items.Add(fps30);
             fpsMenu.Items.Add(fps60);
             camMenu.Items.Add(fpsMenu);
@@ -6096,10 +6355,10 @@ namespace WiFiAudioConnector
             var rot90 = new System.Windows.Controls.MenuItem { Header = "90° 顺时针 (竖屏立放)", IsChecked = _app.CurrentSettings.CameraOrientation == 90 };
             var rot180 = new System.Windows.Controls.MenuItem { Header = "180° 倒置 (倒立放置)", IsChecked = _app.CurrentSettings.CameraOrientation == 180 };
             var rot270 = new System.Windows.Controls.MenuItem { Header = "270° 逆时针 (反向立放)", IsChecked = _app.CurrentSettings.CameraOrientation == 270 };
-            rot0.Click += async (s, e) => { _app.CurrentSettings.CameraOrientation = 0; _app.CurrentSettings.Save(); rot0.IsChecked = true; rot90.IsChecked = false; rot180.IsChecked = false; rot270.IsChecked = false; if (_app.IsCameraRunning) await _app.StartCameraAsync(); };
-            rot90.Click += async (s, e) => { _app.CurrentSettings.CameraOrientation = 90; _app.CurrentSettings.Save(); rot90.IsChecked = true; rot0.IsChecked = false; rot180.IsChecked = false; rot270.IsChecked = false; if (_app.IsCameraRunning) await _app.StartCameraAsync(); };
-            rot180.Click += async (s, e) => { _app.CurrentSettings.CameraOrientation = 180; _app.CurrentSettings.Save(); rot180.IsChecked = true; rot0.IsChecked = false; rot90.IsChecked = false; rot270.IsChecked = false; if (_app.IsCameraRunning) await _app.StartCameraAsync(); };
-            rot270.Click += async (s, e) => { _app.CurrentSettings.CameraOrientation = 270; _app.CurrentSettings.Save(); rot270.IsChecked = true; rot0.IsChecked = false; rot90.IsChecked = false; rot180.IsChecked = false; if (_app.IsCameraRunning) await _app.StartCameraAsync(); };
+            rot0.Click += async (s, e) => { _app.CurrentSettings.CameraOrientation = 0; _app.CurrentSettings.Save(); rot0.IsChecked = true; rot90.IsChecked = false; rot180.IsChecked = false; rot270.IsChecked = false; UpdateCameraSegmentsUI(); if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换旋转: 0° 正常横屏"); };
+            rot90.Click += async (s, e) => { _app.CurrentSettings.CameraOrientation = 90; _app.CurrentSettings.Save(); rot90.IsChecked = true; rot0.IsChecked = false; rot180.IsChecked = false; rot270.IsChecked = false; UpdateCameraSegmentsUI(); if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换旋转: 90° 顺时针立放"); };
+            rot180.Click += async (s, e) => { _app.CurrentSettings.CameraOrientation = 180; _app.CurrentSettings.Save(); rot180.IsChecked = true; rot0.IsChecked = false; rot90.IsChecked = false; rot270.IsChecked = false; UpdateCameraSegmentsUI(); if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换旋转: 180° 倒立放置"); };
+            rot270.Click += async (s, e) => { _app.CurrentSettings.CameraOrientation = 270; _app.CurrentSettings.Save(); rot270.IsChecked = true; rot0.IsChecked = false; rot90.IsChecked = false; rot180.IsChecked = false; UpdateCameraSegmentsUI(); if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换旋转: 270° 逆时针立放"); };
             orientMenu.Items.Add(rot0);
             orientMenu.Items.Add(rot90);
             orientMenu.Items.Add(rot180);
@@ -6107,12 +6366,13 @@ namespace WiFiAudioConnector
             camMenu.Items.Add(orientMenu);
 
             var itemMirror = new System.Windows.Controls.MenuItem { Header = "🪞 水平镜像翻转 (自拍镜面)", IsChecked = _app.CurrentSettings.CameraMirror };
-            itemMirror.Click += async (s, e) =>
+            itemMirror.Click += (s, e) =>
             {
                 _app.CurrentSettings.CameraMirror = !_app.CurrentSettings.CameraMirror;
                 _app.CurrentSettings.Save();
                 itemMirror.IsChecked = _app.CurrentSettings.CameraMirror;
-                if (_app.IsCameraRunning) await _app.StartCameraAsync();
+                UpdateCameraSegmentsUI();
+                if (_app.IsCameraRunning) _app.UpdateCameraMirror(_app.CurrentSettings.CameraMirror);
             };
             camMenu.Items.Add(itemMirror);
 
@@ -6124,7 +6384,8 @@ namespace WiFiAudioConnector
                 _app.CurrentSettings.CameraVirtualDeviceMode = !_app.CurrentSettings.CameraVirtualDeviceMode;
                 _app.CurrentSettings.Save();
                 itemVirtualMode.IsChecked = _app.CurrentSettings.CameraVirtualDeviceMode;
-                if (_app.IsCameraRunning) await _app.StartCameraAsync();
+                UpdateCameraSegmentsUI();
+                if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换摄像头模式");
             };
             camMenu.Items.Add(itemVirtualMode);
 
@@ -6134,7 +6395,8 @@ namespace WiFiAudioConnector
                 _app.CurrentSettings.CameraShowPreviewWindow = !_app.CurrentSettings.CameraShowPreviewWindow;
                 _app.CurrentSettings.Save();
                 itemPreview.IsChecked = _app.CurrentSettings.CameraShowPreviewWindow;
-                if (_app.IsCameraRunning) await _app.StartCameraAsync();
+                UpdateCameraSegmentsUI();
+                if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已更新预览窗口设置");
             };
             camMenu.Items.Add(itemPreview);
 
@@ -6144,7 +6406,8 @@ namespace WiFiAudioConnector
                 _app.CurrentSettings.CameraAlwaysOnTop = !_app.CurrentSettings.CameraAlwaysOnTop;
                 _app.CurrentSettings.Save();
                 itemTop.IsChecked = _app.CurrentSettings.CameraAlwaysOnTop;
-                if (_app.IsCameraRunning) await _app.StartCameraAsync();
+                UpdateCameraSegmentsUI();
+                if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已更新窗口置顶设置");
             };
             camMenu.Items.Add(itemTop);
 
@@ -6573,6 +6836,284 @@ namespace WiFiAudioConnector
 
             _qualityCard.Child = qualityPanel;
             root.Children.Add(_qualityCard);
+
+            // ==========================================
+            // 📷 Camera Settings Card (Directly below audio quality & latency card!)
+            // ==========================================
+            _camCard = new Border
+            {
+                Background = new SolidColorBrush(Color.FromArgb(160, 42, 45, 54)),
+                CornerRadius = new CornerRadius(8),
+                Padding = new Thickness(12),
+                Margin = new Thickness(0, 0, 0, 10)
+            };
+            var camPanel = new StackPanel();
+
+            var tbCamTitle = new TextBlock
+            {
+                Text = "📷 手机无线摄像头设置",
+                FontSize = 12,
+                FontWeight = FontWeights.Bold,
+                Foreground = System.Windows.Media.Brushes.White,
+                Margin = new Thickness(0, 0, 0, 8)
+            };
+            camPanel.Children.Add(tbCamTitle);
+
+            // 1. 镜头与分辨率 (水平两列)
+            var lensResGrid = new Grid { Margin = new Thickness(0, 0, 0, 6) };
+            lensResGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+            lensResGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
+
+            var lensStack = new StackPanel { Margin = new Thickness(0, 0, 4, 0) };
+            lensStack.Children.Add(new TextBlock
+            {
+                Text = "选择镜头:",
+                FontSize = 11,
+                Foreground = new SolidColorBrush(Color.FromArgb(200, 210, 220, 235)),
+                Margin = new Thickness(0, 0, 0, 3)
+            });
+            var lensSegBorder = new Border
+            {
+                Background = new SolidColorBrush(Color.FromArgb(170, 25, 28, 36)),
+                BorderBrush = new SolidColorBrush(Color.FromArgb(60, 255, 255, 255)),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(6),
+                Padding = new Thickness(2)
+            };
+            var lensSegGrid = new System.Windows.Controls.Primitives.UniformGrid { Rows = 1, Columns = 2 };
+            _btnCamFacingBack = CreateCameraSegmentButton("后置主摄");
+            _btnCamFacingFront = CreateCameraSegmentButton("前置自拍");
+            _btnCamFacingBack.Click += async (s, e) =>
+            {
+                if (_app.CurrentSettings.CameraFacing == "back") return;
+                _app.CurrentSettings.CameraFacing = "back";
+                _app.CurrentSettings.Save();
+                UpdateCameraSegmentsUI();
+                if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换至: 后置主摄");
+            };
+            _btnCamFacingFront.Click += async (s, e) =>
+            {
+                if (_app.CurrentSettings.CameraFacing == "front") return;
+                _app.CurrentSettings.CameraFacing = "front";
+                _app.CurrentSettings.Save();
+                UpdateCameraSegmentsUI();
+                if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换至: 前置自拍");
+            };
+            lensSegGrid.Children.Add(_btnCamFacingBack);
+            lensSegGrid.Children.Add(_btnCamFacingFront);
+            lensSegBorder.Child = lensSegGrid;
+            lensStack.Children.Add(lensSegBorder);
+            Grid.SetColumn(lensStack, 0);
+            lensResGrid.Children.Add(lensStack);
+
+            var resStack = new StackPanel { Margin = new Thickness(4, 0, 0, 0) };
+            resStack.Children.Add(new TextBlock
+            {
+                Text = "输出分辨率:",
+                FontSize = 11,
+                Foreground = new SolidColorBrush(Color.FromArgb(200, 210, 220, 235)),
+                Margin = new Thickness(0, 0, 0, 3)
+            });
+            var resSegBorder = new Border
+            {
+                Background = new SolidColorBrush(Color.FromArgb(170, 25, 28, 36)),
+                BorderBrush = new SolidColorBrush(Color.FromArgb(60, 255, 255, 255)),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(6),
+                Padding = new Thickness(2)
+            };
+            var resSegGrid = new System.Windows.Controls.Primitives.UniformGrid { Rows = 1, Columns = 2 };
+            _btnCamRes1080 = CreateCameraSegmentButton("1080P 超清");
+            _btnCamRes720 = CreateCameraSegmentButton("720P 高清");
+            _btnCamRes1080.Click += async (s, e) =>
+            {
+                if (_app.CurrentSettings.CameraSize == "1920x1080") return;
+                _app.CurrentSettings.CameraSize = "1920x1080";
+                _app.CurrentSettings.Save();
+                UpdateCameraSegmentsUI();
+                if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换分辨率: 1080P 超清");
+            };
+            _btnCamRes720.Click += async (s, e) =>
+            {
+                if (_app.CurrentSettings.CameraSize == "1280x720") return;
+                _app.CurrentSettings.CameraSize = "1280x720";
+                _app.CurrentSettings.Save();
+                UpdateCameraSegmentsUI();
+                if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换分辨率: 720P 高清");
+            };
+            resSegGrid.Children.Add(_btnCamRes1080);
+            resSegGrid.Children.Add(_btnCamRes720);
+            resSegBorder.Child = resSegGrid;
+            resStack.Children.Add(resSegBorder);
+            Grid.SetColumn(resStack, 1);
+            lensResGrid.Children.Add(resStack);
+
+            camPanel.Children.Add(lensResGrid);
+
+            // 2. 画面旋转角度 (0° / 90° / 180° / 270°)
+            var rotTitle = new TextBlock
+            {
+                Text = "🔄 画面旋转角度:",
+                FontSize = 11,
+                Foreground = new SolidColorBrush(Color.FromArgb(200, 210, 220, 235)),
+                Margin = new Thickness(0, 3, 0, 3)
+            };
+            camPanel.Children.Add(rotTitle);
+
+            var rotSegBorder = new Border
+            {
+                Background = new SolidColorBrush(Color.FromArgb(170, 25, 28, 36)),
+                BorderBrush = new SolidColorBrush(Color.FromArgb(60, 255, 255, 255)),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(6),
+                Padding = new Thickness(2),
+                Margin = new Thickness(0, 0, 0, 6)
+            };
+            var rotSegGrid = new System.Windows.Controls.Primitives.UniformGrid { Rows = 1, Columns = 4 };
+            _btnCamRot0 = CreateCameraSegmentButton("0° 正常");
+            _btnCamRot90 = CreateCameraSegmentButton("90° 顺时");
+            _btnCamRot180 = CreateCameraSegmentButton("180° 倒立");
+            _btnCamRot270 = CreateCameraSegmentButton("270° 逆时");
+
+            _btnCamRot0.Click += async (s, e) =>
+            {
+                if (_app.CurrentSettings.CameraOrientation == 0) return;
+                _app.CurrentSettings.CameraOrientation = 0;
+                _app.CurrentSettings.Save();
+                UpdateCameraSegmentsUI();
+                if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换旋转: 0° 正常横屏");
+            };
+            _btnCamRot90.Click += async (s, e) =>
+            {
+                if (_app.CurrentSettings.CameraOrientation == 90) return;
+                _app.CurrentSettings.CameraOrientation = 90;
+                _app.CurrentSettings.Save();
+                UpdateCameraSegmentsUI();
+                if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换旋转: 90° 顺时针立放");
+            };
+            _btnCamRot180.Click += async (s, e) =>
+            {
+                if (_app.CurrentSettings.CameraOrientation == 180) return;
+                _app.CurrentSettings.CameraOrientation = 180;
+                _app.CurrentSettings.Save();
+                UpdateCameraSegmentsUI();
+                if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换旋转: 180° 倒立放置");
+            };
+            _btnCamRot270.Click += async (s, e) =>
+            {
+                if (_app.CurrentSettings.CameraOrientation == 270) return;
+                _app.CurrentSettings.CameraOrientation = 270;
+                _app.CurrentSettings.Save();
+                UpdateCameraSegmentsUI();
+                if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换旋转: 270° 逆时针立放");
+            };
+
+            rotSegGrid.Children.Add(_btnCamRot0);
+            rotSegGrid.Children.Add(_btnCamRot90);
+            rotSegGrid.Children.Add(_btnCamRot180);
+            rotSegGrid.Children.Add(_btnCamRot270);
+            rotSegBorder.Child = rotSegGrid;
+            camPanel.Children.Add(rotSegBorder);
+
+            // 3. 自拍镜像与高级设置
+            _cbCamMirror = new CheckBox
+            {
+                Content = "🪞 水平镜像翻转 (自拍镜面，画面左右对调)",
+                Foreground = System.Windows.Media.Brushes.White,
+                FontSize = 11,
+                Margin = new Thickness(0, 2, 0, 4),
+                IsChecked = _app.CurrentSettings.CameraMirror
+            };
+            _cbCamMirror.Checked += (s, e) =>
+            {
+                _app.CurrentSettings.CameraMirror = true;
+                _app.CurrentSettings.Save();
+                UpdateCameraSegmentsUI();
+                if (_app.IsCameraRunning) _app.UpdateCameraMirror(true);
+            };
+            _cbCamMirror.Unchecked += (s, e) =>
+            {
+                _app.CurrentSettings.CameraMirror = false;
+                _app.CurrentSettings.Save();
+                UpdateCameraSegmentsUI();
+                if (_app.IsCameraRunning) _app.UpdateCameraMirror(false);
+            };
+            camPanel.Children.Add(_cbCamMirror);
+
+            _cbCam60Fps = new CheckBox
+            {
+                Content = "⚡ 开启 60 FPS 极速高帧率 (需网络带宽良好)",
+                Foreground = System.Windows.Media.Brushes.White,
+                FontSize = 11,
+                Margin = new Thickness(0, 2, 0, 4),
+                IsChecked = (_app.CurrentSettings.CameraFps == 60)
+            };
+            _cbCam60Fps.Checked += async (s, e) =>
+            {
+                _app.CurrentSettings.CameraFps = 60;
+                _app.CurrentSettings.Save();
+                UpdateCameraSegmentsUI();
+                if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已开启: 60 FPS 高帧率");
+            };
+            _cbCam60Fps.Unchecked += async (s, e) =>
+            {
+                _app.CurrentSettings.CameraFps = 30;
+                _app.CurrentSettings.Save();
+                UpdateCameraSegmentsUI();
+                if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换: 30 FPS 默认帧率");
+            };
+            camPanel.Children.Add(_cbCam60Fps);
+
+            _cbCamVirtual = new CheckBox
+            {
+                Content = "🎥 虚拟摄像头驱动模式 (微信/会议原生免窗口直连)",
+                Foreground = System.Windows.Media.Brushes.White,
+                FontSize = 11,
+                Margin = new Thickness(0, 2, 0, 4),
+                IsChecked = _app.CurrentSettings.CameraVirtualDeviceMode
+            };
+            _cbCamVirtual.Checked += async (s, e) =>
+            {
+                _app.CurrentSettings.CameraVirtualDeviceMode = true;
+                _app.CurrentSettings.Save();
+                UpdateCameraSegmentsUI();
+                if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换: 虚拟摄像头模式");
+            };
+            _cbCamVirtual.Unchecked += async (s, e) =>
+            {
+                _app.CurrentSettings.CameraVirtualDeviceMode = false;
+                _app.CurrentSettings.Save();
+                UpdateCameraSegmentsUI();
+                if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换: 窗口模式");
+            };
+            camPanel.Children.Add(_cbCamVirtual);
+
+            _cbCamPreview = new CheckBox
+            {
+                Content = "🪟 开启桌面实时预览小窗 (置顶浮窗)",
+                Foreground = System.Windows.Media.Brushes.White,
+                FontSize = 11,
+                Margin = new Thickness(0, 2, 0, 2),
+                IsChecked = _app.CurrentSettings.CameraShowPreviewWindow
+            };
+            _cbCamPreview.Checked += async (s, e) =>
+            {
+                _app.CurrentSettings.CameraShowPreviewWindow = true;
+                _app.CurrentSettings.Save();
+                UpdateCameraSegmentsUI();
+                if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已开启: 实时预览小窗");
+            };
+            _cbCamPreview.Unchecked += async (s, e) =>
+            {
+                _app.CurrentSettings.CameraShowPreviewWindow = false;
+                _app.CurrentSettings.Save();
+                UpdateCameraSegmentsUI();
+                if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已关闭: 实时预览小窗");
+            };
+            camPanel.Children.Add(_cbCamPreview);
+
+            _camCard.Child = camPanel;
+            root.Children.Add(_camCard);
 
             // Output Options / Notification & General Settings Card (Directly below Camera!)
             var optsCard = new Border
@@ -7013,6 +7554,7 @@ namespace WiFiAudioConnector
                     catch { }
                 }
 
+                UpdateCameraSegmentsUI();
                 UpdateTriButtonStates();
             };
 
@@ -7302,6 +7844,80 @@ namespace WiFiAudioConnector
             else Dispatcher.BeginInvoke(act);
         }
 
+        public void SetCameraTogglingState(string text)
+        {
+            Action act = () =>
+            {
+                if (_btnTriCamera != null)
+                {
+                    _btnTriCamera.Content = text;
+                    _btnTriCamera.Background = new SolidColorBrush(Color.FromArgb(235, 217, 119, 6)); // Amber
+                    _btnTriCamera.Foreground = System.Windows.Media.Brushes.White;
+                    _btnTriCamera.IsEnabled = false;
+                }
+            };
+            if (CheckAccess()) act();
+            else Dispatcher.BeginInvoke(act);
+        }
+
+        private Button CreateCameraSegmentButton(string text)
+        {
+            var btn = new Button
+            {
+                Content = text,
+                FontSize = 11,
+                FontFamily = new FontFamily("Microsoft YaHei UI, Segoe UI"),
+                BorderThickness = new Thickness(0),
+                Background = System.Windows.Media.Brushes.Transparent,
+                Foreground = new SolidColorBrush(Color.FromArgb(180, 160, 170, 190)),
+                Cursor = System.Windows.Input.Cursors.Hand,
+                Height = 22
+            };
+            return btn;
+        }
+
+        private void SetSegmentActive(Button btn, bool active)
+        {
+            if (btn == null) return;
+            if (active)
+            {
+                btn.Background = new SolidColorBrush(Color.FromArgb(240, 20, 120, 240));
+                btn.Foreground = System.Windows.Media.Brushes.White;
+                btn.FontWeight = FontWeights.Bold;
+            }
+            else
+            {
+                btn.Background = System.Windows.Media.Brushes.Transparent;
+                btn.Foreground = new SolidColorBrush(Color.FromArgb(180, 160, 170, 190));
+                btn.FontWeight = FontWeights.Normal;
+            }
+        }
+
+        public void UpdateCameraSegmentsUI()
+        {
+            Action act = () =>
+            {
+                var s = _app.CurrentSettings;
+                SetSegmentActive(_btnCamFacingBack, s.CameraFacing != "front");
+                SetSegmentActive(_btnCamFacingFront, s.CameraFacing == "front");
+
+                SetSegmentActive(_btnCamRes1080, s.CameraSize != "1280x720");
+                SetSegmentActive(_btnCamRes720, s.CameraSize == "1280x720");
+
+                SetSegmentActive(_btnCamRot0, s.CameraOrientation == 0);
+                SetSegmentActive(_btnCamRot90, s.CameraOrientation == 90);
+                SetSegmentActive(_btnCamRot180, s.CameraOrientation == 180);
+                SetSegmentActive(_btnCamRot270, s.CameraOrientation == 270);
+
+                if (_cbCamMirror != null) _cbCamMirror.IsChecked = s.CameraMirror;
+                if (_cbCam60Fps != null) _cbCam60Fps.IsChecked = (s.CameraFps == 60);
+                if (_cbCamVirtual != null) _cbCamVirtual.IsChecked = s.CameraVirtualDeviceMode;
+                if (_cbCamPreview != null) _cbCamPreview.IsChecked = s.CameraShowPreviewWindow;
+            };
+            if (CheckAccess()) act();
+            else Dispatcher.BeginInvoke(act);
+        }
+
         public void UpdateCameraStateUI(bool isRunning)
         {
             Action act = () =>
@@ -7372,21 +7988,32 @@ namespace WiFiAudioConnector
                 // 3. Camera Button
                 if (_btnTriCamera != null && !_isCameraToggling)
                 {
-                    if (camOn)
+                    if (_app != null && _app.IsReloadingCamera)
                     {
-                        _btnTriCamera.Content = "📷 虚拟摄像头已开";
-                        _btnTriCamera.Background = new SolidColorBrush(Color.FromArgb(235, 147, 51, 234)); // #9333EA Purple
+                        _btnTriCamera.Content = "⏳ 应用新配置中...";
+                        _btnTriCamera.Background = new SolidColorBrush(Color.FromArgb(235, 217, 119, 6)); // Amber #D97706
                         _btnTriCamera.Foreground = System.Windows.Media.Brushes.White;
-                        _btnTriCamera.FontWeight = FontWeights.Bold;
-                        _btnTriCamera.ToolTip = "点击关闭手机无线摄像头\n当前状态: 运行中 (纯后台虚拟驱动直连)\n系统设备名: 「手机无线摄像头」\n微信/腾讯会议/OBS 直接选择该设备即可\n右键: 分辨率/镜头/帧率/窗口预览/驱动管理";
+                        _btnTriCamera.IsEnabled = false;
                     }
                     else
                     {
-                        _btnTriCamera.Content = "📷 虚拟摄像头";
-                        _btnTriCamera.Background = new SolidColorBrush(Color.FromArgb(160, 48, 52, 65));
-                        _btnTriCamera.Foreground = new SolidColorBrush(Color.FromArgb(220, 209, 213, 219));
-                        _btnTriCamera.FontWeight = FontWeights.Normal;
-                        _btnTriCamera.ToolTip = "点击开启手机无线摄像头 (虚拟摄像头直连模式)\n系统设备名: 「手机无线摄像头」\n微信/腾讯会议/OBS 直接选择即可\n右键: 分辨率/镜头/帧率/窗口预览/驱动管理";
+                        _btnTriCamera.IsEnabled = true;
+                        if (camOn)
+                        {
+                            _btnTriCamera.Content = "📷 虚拟摄像头已开";
+                            _btnTriCamera.Background = new SolidColorBrush(Color.FromArgb(235, 147, 51, 234)); // #9333EA Purple
+                            _btnTriCamera.Foreground = System.Windows.Media.Brushes.White;
+                            _btnTriCamera.FontWeight = FontWeights.Bold;
+                            _btnTriCamera.ToolTip = "点击关闭手机无线摄像头\n当前状态: 运行中 (纯后台虚拟驱动直连)\n系统设备名: 「手机无线摄像头」\n微信/腾讯会议/OBS 直接选择该设备即可\n右键: 分辨率/镜头/帧率/窗口预览/驱动管理";
+                        }
+                        else
+                        {
+                            _btnTriCamera.Content = "📷 虚拟摄像头";
+                            _btnTriCamera.Background = new SolidColorBrush(Color.FromArgb(160, 48, 52, 65));
+                            _btnTriCamera.Foreground = new SolidColorBrush(Color.FromArgb(220, 209, 213, 219));
+                            _btnTriCamera.FontWeight = FontWeights.Normal;
+                            _btnTriCamera.ToolTip = "点击开启手机无线摄像头 (虚拟摄像头直连模式)\n系统设备名: 「手机无线摄像头」\n微信/腾讯会议/OBS 直接选择即可\n右键: 分辨率/镜头/帧率/窗口预览/驱动管理";
+                        }
                     }
                 }
             };
