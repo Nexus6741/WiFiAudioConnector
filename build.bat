@@ -10,7 +10,7 @@ if not exist "%CSC_PATH%" (
     exit /b 1
 )
 
-"%CSC_PATH%" /target:winexe /win32icon:app.ico /lib:C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF /r:System.dll,System.Core.dll,System.Drawing.dll,System.Windows.Forms.dll,WindowsBase.dll,PresentationCore.dll,PresentationFramework.dll,System.Xaml.dll /out:WiFiAudioConnector.exe WiFiAudioConnector.cs
+"%CSC_PATH%" /unsafe /target:winexe /win32icon:app.ico /lib:C:\Windows\Microsoft.NET\Framework64\v4.0.30319\WPF /r:System.dll,System.Core.dll,System.Drawing.dll,System.Windows.Forms.dll,WindowsBase.dll,PresentationCore.dll,PresentationFramework.dll,System.Xaml.dll /out:WiFiAudioConnector.exe WiFiAudioConnector.cs
 
 if %ERRORLEVEL% EQU 0 (
     echo.

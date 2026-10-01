@@ -2706,7 +2706,6 @@ namespace WiFiAudioConnector
         private const int HEADER_SIZE = 32;
 
         private Process _scrcpyProc = null;
-        private Process _ffmpegProc = null;
         private Thread _pumpThread = null;
         private volatile bool _isRunning = false;
         private volatile bool _stopping = false;
@@ -2811,6 +2810,11 @@ namespace WiFiAudioConnector
         [DllImport("user32.dll", SetLastError = true)]
         private static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
 
+        [DllImport("user32.dll")]
+        private static extern bool PrintWindow(IntPtr hwnd, IntPtr hdcBlt, uint nFlags);
+
+        private const uint PW_RENDERFULLCONTENT = 2;
+
         public bool Start(string target, string scrcpyPath, string ffmpegPath, string facing, string size, int fps, bool showPreview, bool alwaysOnTop)
         {
             Stop();
@@ -2868,7 +2872,8 @@ namespace WiFiAudioConnector
                 else
                 {
                     string topStr = alwaysOnTop ? "--always-on-top" : "";
-                    windowArgs = string.Format("--window-title={0} --window-width=640 --window-height=360 {1}", windowTitle, topStr);
+                    windowArgs = string.Format("--window-borderless --window-title={0} --window-width={1} --window-height={2} {3}",
+                        windowTitle, width, height, topStr);
                 }
 
                 string scrcpyArgs = string.Format("-s {0} --video-source=camera --camera-facing={1} --camera-size={2} --camera-fps={3} --no-audio {4}",
@@ -2891,9 +2896,9 @@ namespace WiFiAudioConnector
                     return false;
                 }
 
-                // 3. Wait for scrcpy window to appear (up to 6 seconds)
+                // 3. Wait for scrcpy window to appear (up to 8 seconds)
                 IntPtr hwnd = IntPtr.Zero;
-                for (int i = 0; i < 30; i++)
+                for (int i = 0; i < 40; i++)
                 {
                     Thread.Sleep(200);
                     if (_scrcpyProc.HasExited)
@@ -2913,93 +2918,12 @@ namespace WiFiAudioConnector
                     return false;
                 }
 
-                // 4. Launch ffmpeg gdigrab to stream raw RGBA frames to stdout
-                int stride = width * 4;
-                int frameSize = stride * height;
-                string ffmpegArgs = string.Format("-y -f gdigrab -framerate {0} -i title={1} -s {2}x{3} -f rawvideo -pix_fmt rgba pipe:1",
-                    fps, windowTitle, width, height);
-
-                var psiFfmpeg = new ProcessStartInfo
-                {
-                    FileName = ffmpegPath,
-                    Arguments = ffmpegArgs,
-                    UseShellExecute = false,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = false,
-                    CreateNoWindow = true,
-                    WindowStyle = ProcessWindowStyle.Hidden
-                };
-
-                _ffmpegProc = Process.Start(psiFfmpeg);
-                if (_ffmpegProc == null || _ffmpegProc.HasExited)
-                {
-                    App.LogLine("FFmpeg failed to start with args: " + ffmpegArgs);
-                    Stop();
-                    return false;
-                }
-
                 _isRunning = true;
 
-                // 5. Start frame pump thread
+                // 4. Start high-performance native frame pump thread using PrintWindow PW_RENDERFULLCONTENT
                 _pumpThread = new Thread(() =>
                 {
-                    try
-                    {
-                        using (Stream stream = _ffmpegProc.StandardOutput.BaseStream)
-                        {
-                            byte[] frameBuf = new byte[frameSize];
-                            while (!_stopping && _isRunning)
-                            {
-                                int bytesRead = 0;
-                                while (bytesRead < frameSize && !_stopping)
-                                {
-                                    int read = stream.Read(frameBuf, bytesRead, frameSize - bytesRead);
-                                    if (read <= 0) break;
-                                    bytesRead += read;
-                                }
-
-                                if (bytesRead < frameSize) break;
-
-                                // Write to Shared Memory
-                                try
-                                {
-                                    if (_mutex.WaitOne(100))
-                                    {
-                                        try
-                                        {
-                                            _accessor.Write(0, (uint)MAX_SHARED_IMAGE_SIZE);
-                                            _accessor.Write(4, width);
-                                            _accessor.Write(8, height);
-                                            _accessor.Write(12, stride);
-                                            _accessor.Write(16, 0); // FORMAT_UINT8
-                                            _accessor.Write(20, 1); // RESIZEMODE_LINEAR
-                                            _accessor.Write(24, 0); // MIRRORMODE_DISABLED
-                                            _accessor.Write(28, 1000);
-                                            _accessor.WriteArray(32, frameBuf, 0, frameSize);
-                                        }
-                                        finally
-                                        {
-                                            _mutex.ReleaseMutex();
-                                        }
-                                        _eventSent.Set();
-                                    }
-                                }
-                                catch { }
-                            }
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        App.LogLine("VirtualCamManager pump exception: " + ex.Message);
-                    }
-                    finally
-                    {
-                        if (!_stopping)
-                        {
-                            Stop();
-                            if (OnStopped != null) OnStopped();
-                        }
-                    }
+                    PumpLoop(hwnd, width, height, fps);
                 });
                 _pumpThread.IsBackground = true;
                 _pumpThread.Priority = ThreadPriority.AboveNormal;
@@ -3015,21 +2939,126 @@ namespace WiFiAudioConnector
             }
         }
 
+        private unsafe void PumpLoop(IntPtr hwnd, int width, int height, int fps)
+        {
+            System.Drawing.Bitmap bmp = null;
+            byte* basePtr = null;
+
+            try
+            {
+                bmp = new System.Drawing.Bitmap(width, height, System.Drawing.Imaging.PixelFormat.Format32bppRgb);
+                _accessor.SafeMemoryMappedViewHandle.AcquirePointer(ref basePtr);
+                uint* dstPixels = (uint*)(basePtr + HEADER_SIZE);
+                int totalPixels = width * height;
+                int frameDelayMs = 1000 / Math.Max(1, Math.Min(fps, 60));
+                Stopwatch sw = new Stopwatch();
+
+                while (!_stopping && _isRunning)
+                {
+                    if (_scrcpyProc == null || _scrcpyProc.HasExited)
+                    {
+                        App.LogLine("Scrcpy camera process exited.");
+                        break;
+                    }
+
+                    sw.Restart();
+
+                    using (System.Drawing.Graphics g = System.Drawing.Graphics.FromImage(bmp))
+                    {
+                        IntPtr hdc = g.GetHdc();
+                        PrintWindow(hwnd, hdc, PW_RENDERFULLCONTENT);
+                        g.ReleaseHdc(hdc);
+                    }
+
+                    System.Drawing.Imaging.BitmapData bd = bmp.LockBits(
+                        new System.Drawing.Rectangle(0, 0, width, height),
+                        System.Drawing.Imaging.ImageLockMode.ReadOnly,
+                        System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                    try
+                    {
+                        uint* srcPixels = (uint*)bd.Scan0.ToPointer();
+
+                        if (_mutex.WaitOne(40))
+                        {
+                            try
+                            {
+                                _accessor.Write(0, (uint)MAX_SHARED_IMAGE_SIZE);
+                                _accessor.Write(4, width);
+                                _accessor.Write(8, height);
+                                _accessor.Write(12, width * 4);
+                                _accessor.Write(16, 0); // FORMAT_UINT8 (RGBA)
+                                _accessor.Write(20, 1); // RESIZEMODE_LINEAR
+                                _accessor.Write(24, 0); // MIRRORMODE_DISABLED
+                                _accessor.Write(28, 1000);
+
+                                for (int i = 0; i < totalPixels; i++)
+                                {
+                                    uint c = srcPixels[i];
+                                    dstPixels[i] = (c & 0xFF00FF00) | ((c & 0x00FF0000) >> 16) | ((c & 0x000000FF) << 16);
+                                }
+                            }
+                            finally
+                            {
+                                _mutex.ReleaseMutex();
+                            }
+                            _eventSent.Set();
+                        }
+                    }
+                    finally
+                    {
+                        bmp.UnlockBits(bd);
+                    }
+
+                    int elapsed = (int)sw.ElapsedMilliseconds;
+                    int sleepMs = frameDelayMs - elapsed;
+                    if (sleepMs > 0)
+                    {
+                        Thread.Sleep(sleepMs);
+                    }
+                    else
+                    {
+                        Thread.Sleep(1);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                App.LogLine("VirtualCamManager pump exception: " + ex);
+            }
+            finally
+            {
+                if (basePtr != null)
+                {
+                    try { _accessor.SafeMemoryMappedViewHandle.ReleasePointer(); } catch { }
+                    basePtr = null;
+                }
+                if (bmp != null)
+                {
+                    bmp.Dispose();
+                    bmp = null;
+                }
+
+                if (!_stopping)
+                {
+                    Stop();
+                    if (OnStopped != null)
+                    {
+                        try { OnStopped(); } catch { }
+                    }
+                }
+            }
+        }
+
         public void Stop()
         {
             _stopping = true;
             _isRunning = false;
 
-            try
+            if (_pumpThread != null && _pumpThread != Thread.CurrentThread)
             {
-                if (_ffmpegProc != null && !_ffmpegProc.HasExited)
-                {
-                    _ffmpegProc.Kill();
-                    _ffmpegProc.WaitForExit(500);
-                }
+                try { _pumpThread.Join(1000); } catch { }
+                _pumpThread = null;
             }
-            catch { }
-            _ffmpegProc = null;
 
             try
             {
