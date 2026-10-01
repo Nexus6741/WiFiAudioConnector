@@ -127,6 +127,23 @@ namespace WiFiAudioConnector
         public string ChargeType = "";
     }
 
+    public class CameraCapability
+    {
+        public bool HasBack4k = true;
+        public bool HasBack1080p = true;
+        public bool HasBack720p = true;
+        public bool HasFront4k = false;
+        public bool HasFront1080p = true;
+        public bool HasFront720p = true;
+        public bool HasBack24fps = true;
+        public bool HasBack30fps = true;
+        public bool HasBack60fps = true;
+        public bool HasFront24fps = true;
+        public bool HasFront30fps = true;
+        public bool HasFront60fps = true;
+        public bool IsProbed = false;
+    }
+
     public class DeviceHotkeyBinding
     {
         public string Target { get; set; }        // "192.168.31.239:5555" or "a22280af" or Bluetooth ID
@@ -3660,6 +3677,122 @@ namespace WiFiAudioConnector
         public string CurrentBtDeviceName { get { return _currentBtDeviceName; } }
         public string CurrentActiveTarget { get { return _currentScrcpyTarget ?? _currentBtTarget; } }
 
+        private Dictionary<string, CameraCapability> _camCaps = new Dictionary<string, CameraCapability>(StringComparer.OrdinalIgnoreCase);
+
+        public CameraCapability GetCameraCapability(string target)
+        {
+            if (string.IsNullOrEmpty(target)) return new CameraCapability();
+            lock (_camCaps)
+            {
+                CameraCapability cap;
+                if (_camCaps.TryGetValue(target, out cap)) return cap;
+            }
+            return new CameraCapability();
+        }
+
+        public void EnsureCameraProbed(string target)
+        {
+            if (string.IsNullOrEmpty(target) || target.StartsWith(@"\\?\BTHENUM", StringComparison.OrdinalIgnoreCase) || target.StartsWith("Bluetooth#", StringComparison.OrdinalIgnoreCase)) return;
+            lock (_camCaps)
+            {
+                if (_camCaps.ContainsKey(target)) return;
+            }
+
+            Task.Run(() =>
+            {
+                try
+                {
+                    string scrcpyPath = FindToolPath("scrcpy.exe");
+                    if (!File.Exists(scrcpyPath)) return;
+
+                    var psi = new ProcessStartInfo
+                    {
+                        FileName = scrcpyPath,
+                        Arguments = string.Format("-s {0} --list-camera-sizes", target),
+                        CreateNoWindow = true,
+                        UseShellExecute = false,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true
+                    };
+
+                    var cap = new CameraCapability();
+                    bool foundAny = false;
+                    using (var p = Process.Start(psi))
+                    {
+                        string line;
+                        string curFacing = "";
+                        bool curIsHighSpeed = false;
+                        while ((line = p.StandardOutput.ReadLine()) != null)
+                        {
+                            string trimmed = line.Trim();
+                            if (trimmed.Contains("--camera-id="))
+                            {
+                                foundAny = true;
+                                curIsHighSpeed = false;
+                                if (trimmed.Contains("(back")) curFacing = "back";
+                                else if (trimmed.Contains("(front")) curFacing = "front";
+                                else curFacing = "";
+
+                                if (curFacing == "back")
+                                {
+                                    if (trimmed.Contains("24")) cap.HasBack24fps = true;
+                                    if (trimmed.Contains("30")) cap.HasBack30fps = true;
+                                    if (trimmed.Contains("60")) cap.HasBack60fps = true;
+                                }
+                                else if (curFacing == "front")
+                                {
+                                    if (trimmed.Contains("24")) cap.HasFront24fps = true;
+                                    if (trimmed.Contains("30")) cap.HasFront30fps = true;
+                                    if (trimmed.Contains("60")) cap.HasFront60fps = true;
+                                }
+                            }
+                            else if (trimmed.StartsWith("High speed capture"))
+                            {
+                                curIsHighSpeed = true;
+                            }
+                            else if (trimmed.StartsWith("- ") && !curIsHighSpeed)
+                            {
+                                string sizeStr = trimmed.Substring(2).Trim();
+                                int spaceIdx = sizeStr.IndexOf(' ');
+                                if (spaceIdx > 0) sizeStr = sizeStr.Substring(0, spaceIdx);
+
+                                if (curFacing == "back")
+                                {
+                                    if (sizeStr == "3840x2160") cap.HasBack4k = true;
+                                    if (sizeStr == "1920x1080") cap.HasBack1080p = true;
+                                    if (sizeStr == "1280x720") cap.HasBack720p = true;
+                                }
+                                else if (curFacing == "front")
+                                {
+                                    if (sizeStr == "3840x2160") cap.HasFront4k = true;
+                                    if (sizeStr == "1920x1080") cap.HasFront1080p = true;
+                                    if (sizeStr == "1280x720") cap.HasFront720p = true;
+                                }
+                            }
+                        }
+                        p.WaitForExit(4000);
+                    }
+
+                    if (foundAny)
+                    {
+                        cap.IsProbed = true;
+                        lock (_camCaps)
+                        {
+                            _camCaps[target] = cap;
+                        }
+                        if (_flyout != null)
+                        {
+                            _flyout.Dispatcher.BeginInvoke(new Action(() =>
+                            {
+                                _flyout.UpdateCameraSegmentsUI();
+                            }));
+                        }
+                    }
+                }
+                catch { }
+            });
+        }
+
         public bool IsTargetConnected(string target)
         {
             if (string.IsNullOrEmpty(target)) return false;
@@ -3819,6 +3952,11 @@ namespace WiFiAudioConnector
                 _flyout = new FlyoutWindow(this);
                 MainWindow = _flyout;
                 LogLine("FlyoutWindow initialized");
+
+                if (!string.IsNullOrEmpty(_settings.Target) && !_settings.Target.StartsWith(@"\\?\BTHENUM", StringComparison.OrdinalIgnoreCase) && !_settings.Target.StartsWith("Bluetooth#", StringComparison.OrdinalIgnoreCase))
+                {
+                    EnsureCameraProbed(_settings.Target);
+                }
 
                 if (_settings.AutoConnect)
                 {
@@ -4603,6 +4741,7 @@ namespace WiFiAudioConnector
 
                 StartPhoneVolumeSync(target, _scrcpyProc.Id);
                 StartBatteryMonitor(target);
+                EnsureCameraProbed(target);
 
                 if (_settings.MicDirectMode)
                 {
@@ -5564,6 +5703,12 @@ namespace WiFiAudioConnector
                 string ffmpegPath = FindToolPath("ffmpeg.exe");
                 string facing = _settings.CameraFacing ?? "back";
                 string size = _settings.CameraSize ?? "1920x1080";
+                if (facing == "front" && size == "3840x2160")
+                {
+                    size = "1920x1080";
+                    _settings.CameraSize = "1920x1080";
+                    _settings.Save();
+                }
                 int fps = _settings.CameraFps > 0 ? _settings.CameraFps : 30;
 
                 if (_settings.CameraVirtualDeviceMode && _vcamManager != null)
@@ -5657,6 +5802,12 @@ namespace WiFiAudioConnector
 
             string facing = _settings.CameraFacing ?? "back";
             string size = _settings.CameraSize ?? "1920x1080";
+            if (facing == "front" && size == "3840x2160")
+            {
+                size = "1920x1080";
+                _settings.CameraSize = "1920x1080";
+                _settings.Save();
+            }
             int fps = _settings.CameraFps > 0 ? _settings.CameraFps : 30;
 
             // DirectShow Virtual Camera Mode
@@ -6134,10 +6285,15 @@ namespace WiFiAudioConnector
         private bool _isCameraToggling = false;
         private bool _isConnecting = false;
         private bool _isActionInProgress = false;
+        private string _preferredBackSize = "3840x2160";
 
         public FlyoutWindow(App app)
         {
             _app = app;
+            if (_app != null && _app.CurrentSettings != null)
+            {
+                _preferredBackSize = (_app.CurrentSettings.CameraFacing == "front") ? "3840x2160" : _app.CurrentSettings.CameraSize;
+            }
             BuildUI();
             Loaded += (s, e) => TriggerScan();
         }
@@ -6690,7 +6846,23 @@ namespace WiFiAudioConnector
             var itemFacing = new System.Windows.Controls.MenuItem { Header = _app.CurrentSettings.CameraFacing == "front" ? "📱 镜头: 前置自拍" : "📷 镜头: 后置主摄" };
             itemFacing.Click += async (s, e) =>
             {
-                _app.CurrentSettings.CameraFacing = (_app.CurrentSettings.CameraFacing == "front") ? "back" : "front";
+                if (_app.CurrentSettings.CameraFacing == "front")
+                {
+                    _app.CurrentSettings.CameraFacing = "back";
+                    if (!string.IsNullOrEmpty(_preferredBackSize))
+                    {
+                        _app.CurrentSettings.CameraSize = _preferredBackSize;
+                    }
+                }
+                else
+                {
+                    _preferredBackSize = _app.CurrentSettings.CameraSize;
+                    _app.CurrentSettings.CameraFacing = "front";
+                    if (_app.CurrentSettings.CameraSize == "3840x2160")
+                    {
+                        _app.CurrentSettings.CameraSize = "1920x1080";
+                    }
+                }
                 _app.CurrentSettings.Save();
                 itemFacing.Header = _app.CurrentSettings.CameraFacing == "front" ? "📱 镜头: 前置自拍" : "📷 镜头: 后置主摄";
                 UpdateCameraSegmentsUI();
@@ -6702,9 +6874,20 @@ namespace WiFiAudioConnector
             var r1080 = new System.Windows.Controls.MenuItem { Header = "1080P 推荐 (默认)", IsChecked = _app.CurrentSettings.CameraSize == "1920x1080" };
             var r4k = new System.Windows.Controls.MenuItem { Header = "4K 极清", IsChecked = _app.CurrentSettings.CameraSize == "3840x2160" };
             var r720 = new System.Windows.Controls.MenuItem { Header = "720P 极速", IsChecked = _app.CurrentSettings.CameraSize == "1280x720" };
-            r1080.Click += async (s, e) => { _app.CurrentSettings.CameraSize = "1920x1080"; _app.CurrentSettings.Save(); r1080.IsChecked = true; r4k.IsChecked = false; r720.IsChecked = false; UpdateCameraSegmentsUI(); if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换分辨率: 1080P 超清"); };
-            r4k.Click += async (s, e) => { _app.CurrentSettings.CameraSize = "3840x2160"; _app.CurrentSettings.Save(); r4k.IsChecked = true; r1080.IsChecked = false; r720.IsChecked = false; UpdateCameraSegmentsUI(); if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换分辨率: 4K 极清"); };
-            r720.Click += async (s, e) => { _app.CurrentSettings.CameraSize = "1280x720"; _app.CurrentSettings.Save(); r720.IsChecked = true; r1080.IsChecked = false; r4k.IsChecked = false; UpdateCameraSegmentsUI(); if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换分辨率: 720P 高清"); };
+            r1080.Click += async (s, e) => { if (_app.CurrentSettings.CameraFacing == "back") _preferredBackSize = "1920x1080"; _app.CurrentSettings.CameraSize = "1920x1080"; _app.CurrentSettings.Save(); r1080.IsChecked = true; r4k.IsChecked = false; r720.IsChecked = false; UpdateCameraSegmentsUI(); if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换分辨率: 1080P 超清"); };
+            r4k.Click += async (s, e) => {
+                if (_app.CurrentSettings.CameraFacing == "front") {
+                    _app.ShowNotification("前置不支持 4K 分辨率", "前置自拍镜头硬件不支持 4K 16:9，请切换至后置主摄使用 4K", ToolTipIcon.Warning);
+                    return;
+                }
+                _preferredBackSize = "3840x2160";
+                _app.CurrentSettings.CameraSize = "3840x2160";
+                _app.CurrentSettings.Save();
+                r4k.IsChecked = true; r1080.IsChecked = false; r720.IsChecked = false;
+                UpdateCameraSegmentsUI();
+                if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换分辨率: 4K 极清");
+            };
+            r720.Click += async (s, e) => { if (_app.CurrentSettings.CameraFacing == "back") _preferredBackSize = "1280x720"; _app.CurrentSettings.CameraSize = "1280x720"; _app.CurrentSettings.Save(); r720.IsChecked = true; r1080.IsChecked = false; r4k.IsChecked = false; UpdateCameraSegmentsUI(); if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换分辨率: 720P 高清"); };
             resMenu.Items.Add(r1080);
             resMenu.Items.Add(r4k);
             resMenu.Items.Add(r720);
@@ -7269,21 +7452,33 @@ namespace WiFiAudioConnector
             {
                 if (_app.CurrentSettings.CameraFacing == "back") return;
                 _app.CurrentSettings.CameraFacing = "back";
+                // Restore preferred back resolution if previously on 4K or custom
+                if (!string.IsNullOrEmpty(_preferredBackSize))
+                {
+                    _app.CurrentSettings.CameraSize = _preferredBackSize;
+                }
                 _app.CurrentSettings.Save();
                 UpdateCameraSegmentsUI();
-                if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换至: 后置主摄");
+                if (_app.IsCameraRunning)
+                {
+                    string resText = _app.CurrentSettings.CameraSize == "3840x2160" ? "已自动恢复 4K 极清" : "1080P 超清";
+                    await _app.ReloadCameraStreamAsync(string.Format("已切换至: 后置主摄 ({0})", resText));
+                }
             };
             _btnCamFacingFront.Click += async (s, e) =>
             {
                 if (_app.CurrentSettings.CameraFacing == "front") return;
+                // Remember current back resolution before switching
+                _preferredBackSize = _app.CurrentSettings.CameraSize;
                 _app.CurrentSettings.CameraFacing = "front";
+                // Accurate fallback to 1080P if currently on 4K
                 if (_app.CurrentSettings.CameraSize == "3840x2160")
                 {
                     _app.CurrentSettings.CameraSize = "1920x1080";
                 }
                 _app.CurrentSettings.Save();
                 UpdateCameraSegmentsUI();
-                if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换至: 前置自拍");
+                if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换至: 前置自拍 (已准确回落至 1080P)");
             };
             lensSegGrid.Children.Add(_btnCamFacingBack);
             lensSegGrid.Children.Add(_btnCamFacingFront);
@@ -7318,9 +7513,10 @@ namespace WiFiAudioConnector
             {
                 if (_app.CurrentSettings.CameraFacing == "front")
                 {
-                    _app.ShowNotification("无法使用 4K 分辨率", "前置自拍镜头硬件不支持 4K 16:9，请切换至后置主摄使用 4K", ToolTipIcon.Warning);
+                    _app.ShowNotification("前置不支持 4K 分辨率", "前置自拍镜头硬件不支持 4K 16:9，请切换至后置主摄使用 4K", ToolTipIcon.Warning);
                     return;
                 }
+                _preferredBackSize = "3840x2160";
                 if (_app.CurrentSettings.CameraSize == "3840x2160") return;
                 _app.CurrentSettings.CameraSize = "3840x2160";
                 _app.CurrentSettings.Save();
@@ -7329,6 +7525,7 @@ namespace WiFiAudioConnector
             };
             _btnCamRes1080.Click += async (s, e) =>
             {
+                if (_app.CurrentSettings.CameraFacing == "back") _preferredBackSize = "1920x1080";
                 if (_app.CurrentSettings.CameraSize == "1920x1080") return;
                 _app.CurrentSettings.CameraSize = "1920x1080";
                 _app.CurrentSettings.Save();
@@ -7337,6 +7534,7 @@ namespace WiFiAudioConnector
             };
             _btnCamRes720.Click += async (s, e) =>
             {
+                if (_app.CurrentSettings.CameraFacing == "back") _preferredBackSize = "1280x720";
                 if (_app.CurrentSettings.CameraSize == "1280x720") return;
                 _app.CurrentSettings.CameraSize = "1280x720";
                 _app.CurrentSettings.Save();
@@ -7820,6 +8018,10 @@ namespace WiFiAudioConnector
 
             UpdateScrcpyControlsState(item.IsBluetooth, item.IsUsb);
             RefreshBatteryForSelectedDevice(item);
+            if (!item.IsBluetooth && !item.IsCustom && !string.IsNullOrEmpty(item.Target))
+            {
+                _app.EnsureCameraProbed(item.Target);
+            }
 
             // Update connect button text and color based on this specific device's connection status
             bool isSelConn = _app.IsTargetConnected(item.Target);
@@ -8353,9 +8555,30 @@ namespace WiFiAudioConnector
                 var s = _app.CurrentSettings;
                 bool isFront = (s.CameraFacing == "front");
 
+                // Get target to check probed hardware capabilities
+                var sel = GetSelectedDevice();
+                string curTarget = (sel != null && !sel.IsBluetooth) ? sel.Target : (!string.IsNullOrEmpty(_app.CurrentScrcpyTarget) ? _app.CurrentScrcpyTarget : s.Target);
+
+                CameraCapability cap = _app.GetCameraCapability(curTarget);
+
+                bool supports4k = isFront ? cap.HasFront4k : cap.HasBack4k;
+                bool supports1080p = isFront ? cap.HasFront1080p : cap.HasBack1080p;
+                bool supports720p = isFront ? cap.HasFront720p : cap.HasBack720p;
+
+                bool supports24fps = isFront ? cap.HasFront24fps : cap.HasBack24fps;
+                bool supports30fps = isFront ? cap.HasFront30fps : cap.HasBack30fps;
+                bool supports60fps = isFront ? cap.HasFront60fps : cap.HasBack60fps;
+
                 // 1. Lens
                 SetSegmentActive(_btnCamFacingBack, !isFront);
                 SetSegmentActive(_btnCamFacingFront, isFront);
+
+                // Automatic fallback if current resolution is not supported on this lens/device
+                if (s.CameraSize == "3840x2160" && !supports4k)
+                {
+                    s.CameraSize = supports1080p ? "1920x1080" : "1280x720";
+                    s.Save();
+                }
 
                 // 2. Resolution (with hardware capability check)
                 bool is4k = (s.CameraSize == "3840x2160");
@@ -8364,25 +8587,28 @@ namespace WiFiAudioConnector
 
                 if (_btnCamRes4k != null)
                 {
-                    if (isFront)
-                    {
-                        _btnCamRes4k.IsEnabled = false;
-                        _btnCamRes4k.Opacity = 0.35;
-                        _btnCamRes4k.ToolTip = "前置自拍镜头硬件不支持 4K 分辨率 (最高 1080P)";
-                        SetSegmentActive(_btnCamRes4k, false);
-                    }
-                    else
-                    {
-                        _btnCamRes4k.IsEnabled = true;
-                        _btnCamRes4k.Opacity = 1.0;
-                        _btnCamRes4k.ToolTip = "4K 极清分辨率 (3840x2160，后置主摄原生支持)";
-                        SetSegmentActive(_btnCamRes4k, is4k);
-                    }
+                    _btnCamRes4k.IsEnabled = supports4k;
+                    _btnCamRes4k.Opacity = supports4k ? 1.0 : 0.35;
+                    _btnCamRes4k.ToolTip = supports4k
+                        ? "4K 极清分辨率 (3840x2160，设备硬件原生支持)"
+                        : (isFront ? "前置自拍镜头硬件不支持 4K 分辨率 (已安全回落至 1080P)" : "当前连接设备的后置镜头不支持 4K 分辨率");
+                    SetSegmentActive(_btnCamRes4k, is4k && supports4k);
                 }
                 SetSegmentActive(_btnCamRes1080, is1080);
                 SetSegmentActive(_btnCamRes720, is720);
 
                 // 3. FPS (24 / 30 / 60)
+                if (_btnCamFps60 != null)
+                {
+                    _btnCamFps60.IsEnabled = supports60fps;
+                    _btnCamFps60.Opacity = supports60fps ? 1.0 : 0.35;
+                    _btnCamFps60.ToolTip = supports60fps ? "60 FPS 极速高刷 (设备原生支持)" : "当前镜头硬件不支持 60 FPS";
+                    if (s.CameraFps == 60 && !supports60fps)
+                    {
+                        s.CameraFps = 30;
+                        s.Save();
+                    }
+                }
                 int curFps = s.CameraFps > 0 ? s.CameraFps : 30;
                 SetSegmentActive(_btnCamFps24, curFps == 24);
                 SetSegmentActive(_btnCamFps30, curFps == 30);

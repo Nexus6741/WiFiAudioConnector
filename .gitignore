@@ -7,6 +7,8 @@ run.log
 *.tmp
 *.bak
 *.final
+out.txt
+err.txt
 
 # Local user configuration
 WiFiAudioConnector.cfg
