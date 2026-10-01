@@ -4421,8 +4421,12 @@ namespace WiFiAudioConnector
         {
             try
             {
-                string iconName = connected ? "app.ico" : "tray_disconnected.ico";
+                string iconName = connected ? "tray_connected.ico" : "tray_disconnected.ico";
                 string iconPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, iconName);
+                if (!File.Exists(iconPath) && connected)
+                {
+                    iconPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "app.ico");
+                }
                 if (File.Exists(iconPath))
                 {
                     using (var fs = new FileStream(iconPath, FileMode.Open, FileAccess.Read))
@@ -7022,9 +7026,15 @@ namespace WiFiAudioConnector
             {
                 try
                 {
+                    var bi = new System.Windows.Media.Imaging.BitmapImage();
+                    bi.BeginInit();
+                    bi.UriSource = new Uri(appPngPath);
+                    bi.CacheOption = System.Windows.Media.Imaging.BitmapCacheOption.OnLoad;
+                    bi.EndInit();
+
                     var iconImg = new System.Windows.Controls.Image
                     {
-                        Source = new System.Windows.Media.Imaging.BitmapImage(new Uri(appPngPath)),
+                        Source = bi,
                         Width = 22,
                         Height = 22,
                         Margin = new Thickness(0, 0, 8, 0),
