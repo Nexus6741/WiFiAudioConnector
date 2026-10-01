@@ -1694,6 +1694,7 @@ namespace WiFiAudioConnector
         public bool CameraAlwaysOnTop = true;
         public bool CameraVirtualDeviceMode = true; // Use DirectShow Virtual Camera Driver (Phone Wireless Camera)
         public bool CameraShowPreviewWindow = false; // Zero window popup by default (headless D3D off-screen rendering)
+        public bool CameraOnDemand = true; // Smart on-demand streaming to save phone battery & PC resources
         public bool AutoConnect = true;
         public string NotificationMode = "osd"; // "osd", "windows", "none"
         public bool ShowNotifications
@@ -1738,6 +1739,7 @@ namespace WiFiAudioConnector
                 sb.AppendLine("CameraAlwaysOnTop=" + (CameraAlwaysOnTop ? "1" : "0"));
                 sb.AppendLine("CameraVirtualDeviceMode=" + (CameraVirtualDeviceMode ? "1" : "0"));
                 sb.AppendLine("CameraShowPreviewWindow=" + (CameraShowPreviewWindow ? "1" : "0"));
+                sb.AppendLine("CameraOnDemand=" + (CameraOnDemand ? "1" : "0"));
                 sb.AppendLine("AutoConnect=" + (AutoConnect ? "1" : "0"));
                 sb.AppendLine("NotificationMode=" + NotificationMode);
                 sb.AppendLine("ShowNotifications=" + (ShowNotifications ? "1" : "0"));
@@ -1800,6 +1802,7 @@ namespace WiFiAudioConnector
                             else if (k == "CameraAlwaysOnTop") s.CameraAlwaysOnTop = (v == "1");
                             else if (k == "CameraVirtualDeviceMode") s.CameraVirtualDeviceMode = (v == "1");
                             else if (k == "CameraShowPreviewWindow") s.CameraShowPreviewWindow = (v == "1");
+                            else if (k == "CameraOnDemand") s.CameraOnDemand = (v == "1");
                             else if (k == "AutoConnect") s.AutoConnect = (v == "1");
                             else if (k == "NotificationMode") s.NotificationMode = v.ToLowerInvariant();
                             else if (k == "ShowNotifications")
@@ -2713,9 +2716,27 @@ namespace WiFiAudioConnector
 
         private Process _scrcpyProc = null;
         private Thread _pumpThread = null;
+        private Thread _monitorThread = null;
         private volatile bool _isRunning = false;
         private volatile bool _stopping = false;
         private volatile bool _mirror = false;
+        private volatile bool _isServiceEnabled = false;
+        private volatile bool _isStartingStream = false;
+        private readonly object _streamLock = new object();
+        private DateTime _lastWantTime = DateTime.MinValue;
+
+        private string _target;
+        private string _scrcpyPath;
+        private string _ffmpegPath;
+        private string _facing;
+        private string _size;
+        private int _fps = 30;
+        private int _orientation = 0;
+        private bool _showPreview = false;
+        private bool _alwaysOnTop = false;
+        private bool _onDemand = true;
+        private int _currentWidth = 1920;
+        private int _currentHeight = 1080;
 
         private Mutex _mutex = null;
         private EventWaitHandle _eventSent = null;
@@ -2724,8 +2745,12 @@ namespace WiFiAudioConnector
         private MemoryMappedViewAccessor _accessor = null;
 
         public event Action OnStopped;
+        public event Action<bool> OnStreamingStateChanged;
 
-        public bool IsRunning { get { return _isRunning && _scrcpyProc != null && !_scrcpyProc.HasExited; } }
+        public bool IsServiceEnabled { get { return _isServiceEnabled; } }
+        public bool IsStreaming { get { return _isRunning && _scrcpyProc != null && !_scrcpyProc.HasExited; } }
+        public bool IsOnDemandStandby { get { return _isServiceEnabled && !IsStreaming && _onDemand && !_showPreview; } }
+        public bool IsRunning { get { return _isServiceEnabled; } }
 
         public void UpdateMirror(bool mirror)
         {
@@ -2840,10 +2865,72 @@ namespace WiFiAudioConnector
         [DllImport("user32.dll", SetLastError = true)]
         private static extern IntPtr FindWindow(string lpClassName, string lpWindowName);
 
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern int GetWindowLong(IntPtr hWnd, int nIndex);
+
+        [DllImport("user32.dll", SetLastError = true)]
+        private static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+
+        [DllImport("user32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
+
         [DllImport("user32.dll")]
         private static extern bool PrintWindow(IntPtr hwnd, IntPtr hdcBlt, uint nFlags);
 
+        private const int GWL_EXSTYLE = -20;
+        private const int WS_EX_TOOLWINDOW = 0x00000080;
+        private const int WS_EX_APPWINDOW = 0x00040000;
+        private const uint SWP_NOMOVE = 0x0002;
+        private const uint SWP_NOSIZE = 0x0001;
+        private const uint SWP_NOZORDER = 0x0004;
+        private const uint SWP_FRAMECHANGED = 0x0020;
+        private const uint SWP_NOACTIVATE = 0x0010;
         private const uint PW_RENDERFULLCONTENT = 2;
+
+        [ComImport]
+        [Guid("56FDF344-FD6D-11d0-958A-006097C9A090")]
+        private class TaskbarInstance { }
+
+        [ComImport]
+        [Guid("56FDF342-FD6D-11d0-958A-006097C9A090")]
+        [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+        private interface ITaskbarList
+        {
+            [PreserveSig]
+            int HrInit();
+            [PreserveSig]
+            int AddTab(IntPtr hWnd);
+            [PreserveSig]
+            int DeleteTab(IntPtr hWnd);
+            [PreserveSig]
+            int ActivateTab(IntPtr hWnd);
+            [PreserveSig]
+            int SetActiveAlt(IntPtr hWnd);
+        }
+
+        private static void HideFromTaskbarAndAltTab(IntPtr hwnd)
+        {
+            if (hwnd == IntPtr.Zero) return;
+            try
+            {
+                ITaskbarList tb = (ITaskbarList)new TaskbarInstance();
+                tb.HrInit();
+                tb.DeleteTab(hwnd);
+                Marshal.ReleaseComObject(tb);
+            }
+            catch { }
+
+            try
+            {
+                int exStyle = GetWindowLong(hwnd, GWL_EXSTYLE);
+                exStyle |= WS_EX_TOOLWINDOW;
+                exStyle &= ~WS_EX_APPWINDOW;
+                SetWindowLong(hwnd, GWL_EXSTYLE, exStyle);
+                SetWindowPos(hwnd, IntPtr.Zero, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED | SWP_NOACTIVATE);
+            }
+            catch { }
+        }
 
         private void EnsureSharedMemory(int width, int height, bool mirror)
         {
@@ -2894,69 +2981,143 @@ namespace WiFiAudioConnector
             }
         }
 
-        public bool Start(string target, string scrcpyPath, string ffmpegPath, string facing, string size, int fps, bool showPreview, bool alwaysOnTop)
+        private unsafe void WriteStandbyFrame(int width, int height)
         {
-            return Start(target, scrcpyPath, ffmpegPath, facing, size, fps, 0, false, showPreview, alwaysOnTop);
+            if (_accessor == null || _mutex == null) return;
+            try
+            {
+                using (var bmp = new System.Drawing.Bitmap(width, height, System.Drawing.Imaging.PixelFormat.Format32bppArgb))
+                {
+                    using (var g = System.Drawing.Graphics.FromImage(bmp))
+                    {
+                        g.Clear(System.Drawing.Color.FromArgb(24, 25, 29)); // Clean sleek dark slate
+                        g.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
+                        g.TextRenderingHint = System.Drawing.Text.TextRenderingHint.ClearTypeGridFit;
+
+                        using (var brushText = new System.Drawing.SolidBrush(System.Drawing.Color.FromArgb(235, 240, 245)))
+                        using (var brushSub = new System.Drawing.SolidBrush(System.Drawing.Color.FromArgb(145, 155, 170)))
+                        using (var fontIcon = new System.Drawing.Font("Segoe UI Emoji", height >= 720 ? 54 : 36))
+                        using (var fontTitle = new System.Drawing.Font("Microsoft YaHei UI", height >= 720 ? 26 : 18, System.Drawing.FontStyle.Bold))
+                        using (var fontSub = new System.Drawing.Font("Microsoft YaHei UI", height >= 720 ? 15 : 12))
+                        {
+                            var sf = new System.Drawing.StringFormat
+                            {
+                                Alignment = System.Drawing.StringAlignment.Center,
+                                LineAlignment = System.Drawing.StringAlignment.Center
+                            };
+
+                            int centerY = height / 2;
+                            g.DrawString("📱", fontIcon, brushText, new System.Drawing.RectangleF(0, centerY - 110, width, 70), sf);
+                            g.DrawString("手机无线摄像头 · 待机省电中", fontTitle, brushText, new System.Drawing.RectangleF(0, centerY - 30, width, 45), sf);
+                            g.DrawString("智能按需推流已开启：检测到软件调用时将自动秒级唤醒推流", fontSub, brushSub, new System.Drawing.RectangleF(0, centerY + 25, width, 35), sf);
+                        }
+                    }
+
+                    var bd = bmp.LockBits(
+                        new System.Drawing.Rectangle(0, 0, width, height),
+                        System.Drawing.Imaging.ImageLockMode.ReadOnly,
+                        System.Drawing.Imaging.PixelFormat.Format32bppArgb);
+                    try
+                    {
+                        byte* basePtr = null;
+                        _accessor.SafeMemoryMappedViewHandle.AcquirePointer(ref basePtr);
+                        try
+                        {
+                            if (_mutex.WaitOne(100))
+                            {
+                                try
+                                {
+                                    _accessor.Write(0, (uint)MAX_SHARED_IMAGE_SIZE);
+                                    _accessor.Write(4, width);
+                                    _accessor.Write(8, height);
+                                    _accessor.Write(12, width);
+                                    _accessor.Write(16, 0); // FORMAT_UINT8
+                                    _accessor.Write(20, 1);
+                                    _accessor.Write(24, _mirror ? 1 : 0);
+                                    _accessor.Write(28, 1000);
+
+                                    uint* srcPixels = (uint*)bd.Scan0.ToPointer();
+                                    uint* dstPixels = (uint*)(basePtr + HEADER_SIZE);
+                                    int srcStridePixels = bd.Stride / 4;
+
+                                    for (int y = 0; y < height; y++)
+                                    {
+                                        uint* srcRow = srcPixels + y * srcStridePixels;
+                                        uint* dstRow = dstPixels + (height - 1 - y) * width;
+                                        for (int x = 0; x < width; x++)
+                                        {
+                                            uint c = srcRow[x];
+                                            dstRow[x] = (c & 0xFF00FF00) | ((c & 0x00FF0000) >> 16) | ((c & 0x000000FF) << 16);
+                                        }
+                                    }
+                                }
+                                finally
+                                {
+                                    _mutex.ReleaseMutex();
+                                }
+                            }
+                        }
+                        finally
+                        {
+                            if (basePtr != null) _accessor.SafeMemoryMappedViewHandle.ReleasePointer();
+                        }
+                    }
+                    finally
+                    {
+                        bmp.UnlockBits(bd);
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                App.LogLine("WriteStandbyFrame Exception: " + ex.Message);
+            }
         }
 
-        public bool Start(string target, string scrcpyPath, string ffmpegPath, string facing, string size, int fps, int orientation, bool mirror, bool showPreview, bool alwaysOnTop)
+        private bool StartStreamInternal()
         {
-            Stop();
-            _stopping = false;
-            _mirror = mirror;
-
-            int width = 1920;
-            int height = 1080;
-            if (!string.IsNullOrEmpty(size) && size.Contains("x"))
+            lock (_streamLock)
             {
-                var parts = size.Split('x');
-                int.TryParse(parts[0], out width);
-                int.TryParse(parts[1], out height);
-            }
-            if (width <= 0) width = 1920;
-            if (height <= 0) height = 1080;
-            if (fps <= 0) fps = 30;
-
-            int winW = width;
-            int winH = height;
-            string orientArg = "";
-            if (orientation == 90 || orientation == 270)
-            {
-                winW = height;
-                winH = width;
-                orientArg = string.Format("--capture-orientation={0}", orientation);
-            }
-            else if (orientation == 180)
-            {
-                orientArg = "--capture-orientation=180";
+                if (_isRunning || _isStartingStream || !_isServiceEnabled) return false;
+                _isStartingStream = true;
             }
 
             try
             {
-                // 1. Initialize Shared Memory
-                EnsureSharedMemory(width, height, mirror);
+                int winW = _currentWidth;
+                int winH = _currentHeight;
+                string orientArg = "";
+                if (_orientation == 90 || _orientation == 270)
+                {
+                    winW = _currentHeight;
+                    winH = _currentWidth;
+                    orientArg = string.Format("--capture-orientation={0}", _orientation);
+                }
+                else if (_orientation == 180)
+                {
+                    orientArg = "--capture-orientation=180";
+                }
 
-                // 2. Launch Scrcpy
                 string windowTitle = "WiFiAudioCam";
                 string windowArgs;
-                if (!showPreview)
+                if (!_showPreview)
                 {
                     windowArgs = string.Format("--window-borderless --window-title={0} --window-x=-32000 --window-y=-32000 --window-width={1} --window-height={2}",
                         windowTitle, winW, winH);
                 }
                 else
                 {
-                    string topStr = alwaysOnTop ? "--always-on-top" : "";
+                    string topStr = _alwaysOnTop ? "--always-on-top" : "";
                     windowArgs = string.Format("--window-borderless --window-title={0} --window-width={1} --window-height={2} {3}",
                         windowTitle, winW, winH, topStr);
                 }
 
                 string scrcpyArgs = string.Format("-s {0} --video-source=camera --camera-facing={1} --camera-size={2} --camera-fps={3} {4} --no-audio {5}",
-                    target, facing, size, fps, orientArg, windowArgs);
+                    _target, _facing, _size, _fps, orientArg, windowArgs);
 
                 var psiScrcpy = new ProcessStartInfo
                 {
-                    FileName = scrcpyPath,
+                    FileName = _scrcpyPath,
                     Arguments = scrcpyArgs,
                     CreateNoWindow = true,
                     UseShellExecute = false,
@@ -2973,11 +3134,9 @@ namespace WiFiAudioConnector
                 if (_scrcpyProc == null || _scrcpyProc.HasExited)
                 {
                     App.LogLine("Scrcpy failed to start with arguments: " + scrcpyArgs);
-                    Stop();
                     return false;
                 }
 
-                // 3. Wait for scrcpy window to appear (up to 8 seconds)
                 IntPtr hwnd = IntPtr.Zero;
                 for (int i = 0; i < 40; i++)
                 {
@@ -2985,7 +3144,6 @@ namespace WiFiAudioConnector
                     if (_scrcpyProc.HasExited)
                     {
                         App.LogLine("Scrcpy exited prematurely.");
-                        Stop();
                         return false;
                     }
                     hwnd = FindWindow(null, windowTitle);
@@ -2995,37 +3153,111 @@ namespace WiFiAudioConnector
                 if (hwnd == IntPtr.Zero)
                 {
                     App.LogLine("Scrcpy camera window not found within timeout.");
-                    Stop();
                     return false;
                 }
 
-                _isRunning = true;
+                if (!_showPreview)
+                {
+                    HideFromTaskbarAndAltTab(hwnd);
+                }
 
-                // 4. Start high-performance native frame pump thread using PrintWindow PW_RENDERFULLCONTENT
+                _stopping = false;
+                _isRunning = true;
+                _lastWantTime = DateTime.UtcNow;
+
                 _pumpThread = new Thread(() =>
                 {
-                    PumpLoop(hwnd, winW, winH, width, height, fps);
+                    PumpLoop(hwnd, winW, winH, _currentWidth, _currentHeight, _fps);
                 });
                 _pumpThread.IsBackground = true;
                 _pumpThread.Priority = ThreadPriority.AboveNormal;
                 _pumpThread.Start();
 
+                if (OnStreamingStateChanged != null)
+                {
+                    try { OnStreamingStateChanged(true); } catch { }
+                }
                 return true;
             }
             catch (Exception ex)
             {
-                App.LogLine("VirtualCamManager.Start Exception: " + ex);
-                Stop();
+                App.LogLine("StartStreamInternal Exception: " + ex);
                 return false;
+            }
+            finally
+            {
+                lock (_streamLock)
+                {
+                    _isStartingStream = false;
+                }
             }
         }
 
-        public bool Restart(string target, string scrcpyPath, string ffmpegPath, string facing, string size, int fps, int orientation, bool mirror, bool showPreview, bool alwaysOnTop)
+        private void OnDemandMonitorLoop()
         {
-            StopStreamOnly();
-            Thread.Sleep(700); // Allow Android Camera2 session to cleanly unbind
+            while (_isServiceEnabled && !_stopping)
+            {
+                try
+                {
+                    if (_eventWant != null && _eventWant.WaitOne(400))
+                    {
+                        _lastWantTime = DateTime.UtcNow;
+                        if (!_isRunning && !_isStartingStream && _isServiceEnabled && !_stopping)
+                        {
+                            StartStreamInternal();
+                        }
+                    }
+                    else
+                    {
+                        if (_isRunning && !_isStartingStream && _onDemand && !_showPreview)
+                        {
+                            double idleSec = (DateTime.UtcNow - _lastWantTime).TotalSeconds;
+                            if (idleSec >= 6.0)
+                            {
+                                App.LogLine(string.Format("Camera idle for {0:0.0}s. Entering standby to save battery...", idleSec));
+                                StopStreamOnly();
+                                WriteStandbyFrame(_currentWidth, _currentHeight);
+                                if (OnStreamingStateChanged != null)
+                                {
+                                    try { OnStreamingStateChanged(false); } catch { }
+                                }
+                            }
+                        }
+                    }
+                }
+                catch (ThreadInterruptedException) { break; }
+                catch (Exception ex)
+                {
+                    App.LogLine("OnDemandMonitorLoop error: " + ex.Message);
+                }
+            }
+        }
+
+        public bool Start(string target, string scrcpyPath, string ffmpegPath, string facing, string size, int fps, bool showPreview, bool alwaysOnTop)
+        {
+            return Start(target, scrcpyPath, ffmpegPath, facing, size, fps, 0, false, showPreview, alwaysOnTop, true);
+        }
+
+        public bool Start(string target, string scrcpyPath, string ffmpegPath, string facing, string size, int fps, int orientation, bool mirror, bool showPreview, bool alwaysOnTop)
+        {
+            return Start(target, scrcpyPath, ffmpegPath, facing, size, fps, orientation, mirror, showPreview, alwaysOnTop, true);
+        }
+
+        public bool Start(string target, string scrcpyPath, string ffmpegPath, string facing, string size, int fps, int orientation, bool mirror, bool showPreview, bool alwaysOnTop, bool onDemand)
+        {
+            Stop();
             _stopping = false;
             _mirror = mirror;
+            _target = target;
+            _scrcpyPath = scrcpyPath;
+            _ffmpegPath = ffmpegPath;
+            _facing = facing;
+            _size = size;
+            _fps = fps;
+            _orientation = orientation;
+            _showPreview = showPreview;
+            _alwaysOnTop = alwaysOnTop;
+            _onDemand = onDemand;
 
             int width = 1920;
             int height = 1080;
@@ -3039,84 +3271,109 @@ namespace WiFiAudioConnector
             if (height <= 0) height = 1080;
             if (fps <= 0) fps = 30;
 
-            int winW = width;
-            int winH = height;
-            string orientArg = "";
-            if (orientation == 90 || orientation == 270)
-            {
-                winW = height;
-                winH = width;
-                orientArg = string.Format("--capture-orientation={0}", orientation);
-            }
-            else if (orientation == 180)
-            {
-                orientArg = "--capture-orientation=180";
-            }
+            _currentWidth = width;
+            _currentHeight = height;
 
             try
             {
                 EnsureSharedMemory(width, height, mirror);
+                WriteStandbyFrame(width, height);
+                _isServiceEnabled = true;
 
-                string windowTitle = "WiFiAudioCam";
-                string windowArgs;
-                if (!showPreview)
+                if (_onDemand && !_showPreview)
                 {
-                    windowArgs = string.Format("--window-borderless --window-title={0} --window-x=-32000 --window-y=-32000 --window-width={1} --window-height={2}",
-                        windowTitle, winW, winH);
+                    _monitorThread = new Thread(OnDemandMonitorLoop);
+                    _monitorThread.IsBackground = true;
+                    _monitorThread.Name = "VirtualCamOnDemandMonitor";
+                    _monitorThread.Start();
+
+                    if (OnStreamingStateChanged != null)
+                    {
+                        try { OnStreamingStateChanged(false); } catch { }
+                    }
+                    return true;
                 }
                 else
                 {
-                    string topStr = alwaysOnTop ? "--always-on-top" : "";
-                    windowArgs = string.Format("--window-borderless --window-title={0} --window-width={1} --window-height={2} {3}",
-                        windowTitle, winW, winH, topStr);
+                    bool ok = StartStreamInternal();
+                    if (!ok)
+                    {
+                        Stop();
+                        return false;
+                    }
+                    return true;
                 }
+            }
+            catch (Exception ex)
+            {
+                App.LogLine("VirtualCamManager.Start Exception: " + ex);
+                Stop();
+                return false;
+            }
+        }
 
-                string scrcpyArgs = string.Format("-s {0} --video-source=camera --camera-facing={1} --camera-size={2} --camera-fps={3} {4} --no-audio {5}",
-                    target, facing, size, fps, orientArg, windowArgs);
+        public bool Restart(string target, string scrcpyPath, string ffmpegPath, string facing, string size, int fps, int orientation, bool mirror, bool showPreview, bool alwaysOnTop)
+        {
+            return Restart(target, scrcpyPath, ffmpegPath, facing, size, fps, orientation, mirror, showPreview, alwaysOnTop, true);
+        }
 
-                var psiScrcpy = new ProcessStartInfo
+        public bool Restart(string target, string scrcpyPath, string ffmpegPath, string facing, string size, int fps, int orientation, bool mirror, bool showPreview, bool alwaysOnTop, bool onDemand)
+        {
+            StopStreamOnly();
+            Thread.Sleep(700);
+            _stopping = false;
+            _mirror = mirror;
+            _target = target;
+            _scrcpyPath = scrcpyPath;
+            _ffmpegPath = ffmpegPath;
+            _facing = facing;
+            _size = size;
+            _fps = fps;
+            _orientation = orientation;
+            _showPreview = showPreview;
+            _alwaysOnTop = alwaysOnTop;
+            _onDemand = onDemand;
+
+            int width = 1920;
+            int height = 1080;
+            if (!string.IsNullOrEmpty(size) && size.Contains("x"))
+            {
+                var parts = size.Split('x');
+                int.TryParse(parts[0], out width);
+                int.TryParse(parts[1], out height);
+            }
+            if (width <= 0) width = 1920;
+            if (height <= 0) height = 1080;
+            if (fps <= 0) fps = 30;
+
+            _currentWidth = width;
+            _currentHeight = height;
+
+            try
+            {
+                EnsureSharedMemory(width, height, mirror);
+                WriteStandbyFrame(width, height);
+                _isServiceEnabled = true;
+
+                if (_onDemand && !_showPreview)
                 {
-                    FileName = scrcpyPath,
-                    Arguments = scrcpyArgs,
-                    CreateNoWindow = true,
-                    UseShellExecute = false,
-                    WindowStyle = ProcessWindowStyle.Normal
-                };
-
-                _scrcpyProc = Process.Start(psiScrcpy);
-                if (_scrcpyProc == null || _scrcpyProc.HasExited)
-                {
-                    Thread.Sleep(600);
-                    _scrcpyProc = Process.Start(psiScrcpy);
+                    if (_monitorThread == null || !_monitorThread.IsAlive)
+                    {
+                        _monitorThread = new Thread(OnDemandMonitorLoop);
+                        _monitorThread.IsBackground = true;
+                        _monitorThread.Name = "VirtualCamOnDemandMonitor";
+                        _monitorThread.Start();
+                    }
+                    if (OnStreamingStateChanged != null)
+                    {
+                        try { OnStreamingStateChanged(false); } catch { }
+                    }
+                    return true;
                 }
-
-                if (_scrcpyProc == null || _scrcpyProc.HasExited)
+                else
                 {
-                    App.LogLine("Scrcpy camera restart failed: " + scrcpyArgs);
-                    return false;
+                    return StartStreamInternal();
                 }
-
-                IntPtr hwnd = IntPtr.Zero;
-                for (int i = 0; i < 40; i++)
-                {
-                    Thread.Sleep(200);
-                    if (_scrcpyProc.HasExited) return false;
-                    hwnd = FindWindow(null, windowTitle);
-                    if (hwnd != IntPtr.Zero) break;
-                }
-
-                if (hwnd == IntPtr.Zero) return false;
-
-                _isRunning = true;
-                _pumpThread = new Thread(() =>
-                {
-                    PumpLoop(hwnd, winW, winH, width, height, fps);
-                });
-                _pumpThread.IsBackground = true;
-                _pumpThread.Priority = ThreadPriority.AboveNormal;
-                _pumpThread.Start();
-
-                return true;
             }
             catch (Exception ex)
             {
@@ -3158,6 +3415,11 @@ namespace WiFiAudioConnector
                     {
                         App.LogLine("Scrcpy camera process exited.");
                         break;
+                    }
+
+                    if (_eventWant != null && _eventWant.WaitOne(0))
+                    {
+                        _lastWantTime = DateTime.UtcNow;
                     }
 
                     sw.Restart();
@@ -3260,7 +3522,17 @@ namespace WiFiAudioConnector
                     bmpTarget = null;
                 }
 
-                if (!_stopping)
+                _isRunning = false;
+
+                if (!_stopping && _isServiceEnabled && _onDemand && !_showPreview)
+                {
+                    WriteStandbyFrame(_currentWidth, _currentHeight);
+                    if (OnStreamingStateChanged != null)
+                    {
+                        try { OnStreamingStateChanged(false); } catch { }
+                    }
+                }
+                else if (!_stopping && !_isServiceEnabled)
                 {
                     Stop();
                     if (OnStopped != null)
@@ -3296,6 +3568,20 @@ namespace WiFiAudioConnector
 
         public void Stop()
         {
+            _isServiceEnabled = false;
+            _stopping = true;
+
+            if (_monitorThread != null && _monitorThread != Thread.CurrentThread)
+            {
+                try
+                {
+                    _monitorThread.Interrupt();
+                    _monitorThread.Join(500);
+                }
+                catch { }
+                _monitorThread = null;
+            }
+
             StopStreamOnly();
 
             if (_accessor != null)
@@ -3322,6 +3608,11 @@ namespace WiFiAudioConnector
             {
                 try { _mutex.Dispose(); } catch { }
                 _mutex = null;
+            }
+
+            if (OnStopped != null)
+            {
+                try { OnStopped(); } catch { }
             }
         }
 
@@ -3356,6 +3647,8 @@ namespace WiFiAudioConnector
 
         public bool IsScrcpyConnected { get { return _scrcpyProc != null && !_scrcpyProc.HasExited; } }
         public bool IsCameraRunning { get { return (_vcamManager != null && _vcamManager.IsRunning) || (_cameraProc != null && !_cameraProc.HasExited); } }
+        public bool IsCameraStreaming { get { return _vcamManager != null && _vcamManager.IsStreaming; } }
+        public bool IsCameraOnDemandStandby { get { return _vcamManager != null && _vcamManager.IsOnDemandStandby; } }
         public VirtualCamManager VCamManager { get { return _vcamManager; } }
         public bool IsMicRunning { get { return _micProc != null && !_micProc.HasExited; } }
         public bool IsBluetoothConnected { get { return _isBluetoothConnected && _btConnector != null && _btConnector.IsConnected; } }
@@ -5250,7 +5543,7 @@ namespace WiFiAudioConnector
                 {
                     bool ok = await Task.Run<bool>(() =>
                     {
-                        return _vcamManager.Restart(target, scrcpyPath, ffmpegPath, facing, size, fps, _settings.CameraOrientation, _settings.CameraMirror, _settings.CameraShowPreviewWindow, _settings.CameraAlwaysOnTop);
+                        return _vcamManager.Restart(target, scrcpyPath, ffmpegPath, facing, size, fps, _settings.CameraOrientation, _settings.CameraMirror, _settings.CameraShowPreviewWindow, _settings.CameraAlwaysOnTop, _settings.CameraOnDemand);
                     });
 
                     if (ok)
@@ -5389,15 +5682,37 @@ namespace WiFiAudioConnector
                                 }
                             }));
                         };
+                        _vcamManager.OnStreamingStateChanged += (isStreaming) =>
+                        {
+                            Dispatcher.BeginInvoke(new Action(() =>
+                            {
+                                UpdateCameraUI();
+                                if (isStreaming)
+                                {
+                                    ShowNotification("无线摄像头已唤醒", "检测到电脑软件正在调用摄像头，已自动唤醒手机推流！", ToolTipIcon.Info);
+                                }
+                                else
+                                {
+                                    ShowNotification("无线摄像头进入待机", "软件已停止使用摄像头，手机已暂停推流以节省电量。", ToolTipIcon.Info);
+                                }
+                            }));
+                        };
                     }
-                    return _vcamManager.Start(target, scrcpyPath, ffmpegPath, facing, size, fps, _settings.CameraOrientation, _settings.CameraMirror, showPreview, _settings.CameraAlwaysOnTop);
+                    return _vcamManager.Start(target, scrcpyPath, ffmpegPath, facing, size, fps, _settings.CameraOrientation, _settings.CameraMirror, showPreview, _settings.CameraAlwaysOnTop, _settings.CameraOnDemand);
                 });
 
                 if (ok)
                 {
                     UpdateCameraUI();
-                    string previewText = showPreview ? "已显示独立预览浮窗" : "纯后台静默运行 (零黑框零弹窗)";
-                    ShowNotification("无线摄像头已启动", string.Format("{0}\n已就绪！系统设备:「手机无线摄像头」\n微信/腾讯会议/OBS 直接选择该设备即可\n({1})", devName, previewText), ToolTipIcon.Info);
+                    if (_settings.CameraOnDemand && !showPreview)
+                    {
+                        ShowNotification("无线摄像头已就绪 (待机省电中)", string.Format("{0}\n已就绪！系统设备:「手机无线摄像头」\n智能按需推流已启用：仅在微信/会议等软件调用摄像头时才唤醒推流，平时手机不耗电！", devName), ToolTipIcon.Info);
+                    }
+                    else
+                    {
+                        string previewText = showPreview ? "已显示独立预览浮窗" : "纯后台静默运行 (零黑框零弹窗)";
+                        ShowNotification("无线摄像头已启动", string.Format("{0}\n已就绪！系统设备:「手机无线摄像头」\n微信/腾讯会议/OBS 直接选择该设备即可\n({1})", devName, previewText), ToolTipIcon.Info);
+                    }
                     return true;
                 }
                 else
@@ -5737,6 +6052,7 @@ namespace WiFiAudioConnector
         private Button _btnCamRot180;
         private Button _btnCamRot270;
         private CheckBox _cbCamMirror;
+        private CheckBox _cbCamOnDemand;
         private CheckBox _cbCam60Fps;
         private CheckBox _cbCamVirtual;
         private CheckBox _cbCamPreview;
@@ -6378,6 +6694,17 @@ namespace WiFiAudioConnector
 
             camMenu.Items.Add(new System.Windows.Controls.Separator());
 
+            var itemOnDemand = new System.Windows.Controls.MenuItem { Header = "⚡ 智能按需推流 (待机省电模式)", IsChecked = _app.CurrentSettings.CameraOnDemand };
+            itemOnDemand.Click += async (s, e) =>
+            {
+                _app.CurrentSettings.CameraOnDemand = !_app.CurrentSettings.CameraOnDemand;
+                _app.CurrentSettings.Save();
+                itemOnDemand.IsChecked = _app.CurrentSettings.CameraOnDemand;
+                UpdateCameraSegmentsUI();
+                if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换按需推流设置");
+            };
+            camMenu.Items.Add(itemOnDemand);
+
             var itemVirtualMode = new System.Windows.Controls.MenuItem { Header = "🎥 虚拟摄像头驱动模式 (系统原生直连)", IsChecked = _app.CurrentSettings.CameraVirtualDeviceMode };
             itemVirtualMode.Click += async (s, e) =>
             {
@@ -6441,6 +6768,7 @@ namespace WiFiAudioConnector
             camMenu.Opened += (s, e) =>
             {
                 itemDriverStatus.Header = "ℹ️ 状态: " + (VirtualCamManager.IsDriverInstalled() ? "已注册就绪 (手机无线摄像头)" : "未注册");
+                itemOnDemand.IsChecked = _app.CurrentSettings.CameraOnDemand;
                 itemVirtualMode.IsChecked = _app.CurrentSettings.CameraVirtualDeviceMode;
                 itemPreview.IsChecked = _app.CurrentSettings.CameraShowPreviewWindow;
                 itemTop.IsChecked = _app.CurrentSettings.CameraAlwaysOnTop;
@@ -7039,6 +7367,30 @@ namespace WiFiAudioConnector
                 if (_app.IsCameraRunning) _app.UpdateCameraMirror(false);
             };
             camPanel.Children.Add(_cbCamMirror);
+
+            _cbCamOnDemand = new CheckBox
+            {
+                Content = "⚡ 智能按需推流 (待机省电: 仅在软件调用时才推流)",
+                Foreground = System.Windows.Media.Brushes.White,
+                FontSize = 11,
+                Margin = new Thickness(0, 2, 0, 4),
+                IsChecked = _app.CurrentSettings.CameraOnDemand
+            };
+            _cbCamOnDemand.Checked += async (s, e) =>
+            {
+                _app.CurrentSettings.CameraOnDemand = true;
+                _app.CurrentSettings.Save();
+                UpdateCameraSegmentsUI();
+                if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已开启: 智能按需推流");
+            };
+            _cbCamOnDemand.Unchecked += async (s, e) =>
+            {
+                _app.CurrentSettings.CameraOnDemand = false;
+                _app.CurrentSettings.Save();
+                UpdateCameraSegmentsUI();
+                if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换: 持续推流模式");
+            };
+            camPanel.Children.Add(_cbCamOnDemand);
 
             _cbCam60Fps = new CheckBox
             {
@@ -7910,6 +8262,7 @@ namespace WiFiAudioConnector
                 SetSegmentActive(_btnCamRot270, s.CameraOrientation == 270);
 
                 if (_cbCamMirror != null) _cbCamMirror.IsChecked = s.CameraMirror;
+                if (_cbCamOnDemand != null) _cbCamOnDemand.IsChecked = s.CameraOnDemand;
                 if (_cbCam60Fps != null) _cbCam60Fps.IsChecked = (s.CameraFps == 60);
                 if (_cbCamVirtual != null) _cbCamVirtual.IsChecked = s.CameraVirtualDeviceMode;
                 if (_cbCamPreview != null) _cbCamPreview.IsChecked = s.CameraShowPreviewWindow;
@@ -8000,11 +8353,30 @@ namespace WiFiAudioConnector
                         _btnTriCamera.IsEnabled = true;
                         if (camOn)
                         {
-                            _btnTriCamera.Content = "📷 虚拟摄像头已开";
-                            _btnTriCamera.Background = new SolidColorBrush(Color.FromArgb(235, 147, 51, 234)); // #9333EA Purple
-                            _btnTriCamera.Foreground = System.Windows.Media.Brushes.White;
-                            _btnTriCamera.FontWeight = FontWeights.Bold;
-                            _btnTriCamera.ToolTip = "点击关闭手机无线摄像头\n当前状态: 运行中 (纯后台虚拟驱动直连)\n系统设备名: 「手机无线摄像头」\n微信/腾讯会议/OBS 直接选择该设备即可\n右键: 分辨率/镜头/帧率/窗口预览/驱动管理";
+                            if (_app != null && _app.IsCameraStreaming)
+                            {
+                                _btnTriCamera.Content = "🟢 摄像头使用中";
+                                _btnTriCamera.Background = new SolidColorBrush(Color.FromArgb(235, 16, 185, 129)); // #10B981 Emerald Green
+                                _btnTriCamera.Foreground = System.Windows.Media.Brushes.White;
+                                _btnTriCamera.FontWeight = FontWeights.Bold;
+                                _btnTriCamera.ToolTip = "点击关闭手机无线摄像头\n当前状态: 正在推流中 (第三方软件正在使用摄像头)\n系统设备名: 「手机无线摄像头」\n右键: 分辨率/镜头/帧率/窗口预览/驱动管理";
+                            }
+                            else if (_app != null && _app.IsCameraOnDemandStandby)
+                            {
+                                _btnTriCamera.Content = "📸 摄像头待机中";
+                                _btnTriCamera.Background = new SolidColorBrush(Color.FromArgb(235, 147, 51, 234)); // #9333EA Purple
+                                _btnTriCamera.Foreground = System.Windows.Media.Brushes.White;
+                                _btnTriCamera.FontWeight = FontWeights.Bold;
+                                _btnTriCamera.ToolTip = "点击关闭手机无线摄像头\n当前状态: 智能待机省电中 (手机不耗电)\n当微信/腾讯会议/浏览器等软件调用摄像头时将自动秒级唤醒推流\n系统设备名: 「手机无线摄像头」\n右键: 分辨率/镜头/帧率/窗口预览/驱动管理";
+                            }
+                            else
+                            {
+                                _btnTriCamera.Content = "📷 虚拟摄像头已开";
+                                _btnTriCamera.Background = new SolidColorBrush(Color.FromArgb(235, 147, 51, 234)); // #9333EA Purple
+                                _btnTriCamera.Foreground = System.Windows.Media.Brushes.White;
+                                _btnTriCamera.FontWeight = FontWeights.Bold;
+                                _btnTriCamera.ToolTip = "点击关闭手机无线摄像头\n当前状态: 运行中 (纯后台虚拟驱动直连)\n系统设备名: 「手机无线摄像头」\n微信/腾讯会议/OBS 直接选择该设备即可\n右键: 分辨率/镜头/帧率/窗口预览/驱动管理";
+                            }
                         }
                         else
                         {
