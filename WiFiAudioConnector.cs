@@ -4897,6 +4897,8 @@ namespace WiFiAudioConnector
         private Border _cameraCard;
         private Button _btnCameraToggle;
         private TextBlock _tbCameraStatus;
+        private Button _btnToggleCamDetails;
+        private StackPanel _cameraDetailsPanel;
         private RadioButton _rbCamBack;
         private RadioButton _rbCamFront;
         private RadioButton _rbCam4K;
@@ -5688,6 +5690,7 @@ namespace WiFiAudioConnector
             DockPanel.SetDock(camTitle, Dock.Left);
             camHeaderRow.Children.Add(camTitle);
 
+            var headerRight = new StackPanel { Orientation = Orientation.Horizontal };
             _tbCameraStatus = new TextBlock
             {
                 Text = _app.IsCameraRunning ? "🟢 4K 运行中" : "未开启",
@@ -5695,10 +5698,28 @@ namespace WiFiAudioConnector
                 FontWeight = FontWeights.SemiBold,
                 FontFamily = new FontFamily("Segoe UI Emoji, Microsoft YaHei UI"),
                 Foreground = _app.IsCameraRunning ? new SolidColorBrush(Color.FromArgb(255, 34, 197, 94)) : new SolidColorBrush(Color.FromArgb(160, 148, 163, 184)),
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 8, 0)
+            };
+            headerRight.Children.Add(_tbCameraStatus);
+
+            _btnToggleCamDetails = new Button
+            {
+                Content = "⚙ 设置 ▼",
+                FontSize = 10,
+                FontFamily = new FontFamily("Segoe UI Emoji, Microsoft YaHei UI"),
+                Background = new SolidColorBrush(Color.FromArgb(120, 50, 55, 68)),
+                Foreground = new SolidColorBrush(Color.FromArgb(220, 200, 215, 235)),
+                BorderThickness = new Thickness(0),
+                Cursor = System.Windows.Input.Cursors.Hand,
+                Padding = new Thickness(6, 2, 6, 2),
+                Height = 20,
                 VerticalAlignment = VerticalAlignment.Center
             };
-            DockPanel.SetDock(_tbCameraStatus, Dock.Right);
-            camHeaderRow.Children.Add(_tbCameraStatus);
+            headerRight.Children.Add(_btnToggleCamDetails);
+
+            DockPanel.SetDock(headerRight, Dock.Right);
+            camHeaderRow.Children.Add(headerRight);
             cameraPanel.Children.Add(camHeaderRow);
 
             // Toggle Button
@@ -5713,13 +5734,27 @@ namespace WiFiAudioConnector
                 Foreground = System.Windows.Media.Brushes.White,
                 BorderThickness = new Thickness(0),
                 Cursor = System.Windows.Input.Cursors.Hand,
-                Margin = new Thickness(0, 0, 0, 8)
+                Margin = new Thickness(0, 0, 0, 0)
             };
             _btnCameraToggle.Click += (s, e) =>
             {
                 _app.ToggleCamera();
             };
             cameraPanel.Children.Add(_btnCameraToggle);
+
+            // Collapsible Details & Parameter Panel (Hidden by default to keep panel compact!)
+            _cameraDetailsPanel = new StackPanel
+            {
+                Margin = new Thickness(0, 6, 0, 0),
+                Visibility = Visibility.Collapsed
+            };
+
+            _btnToggleCamDetails.Click += (s, e) =>
+            {
+                bool isCollapsed = (_cameraDetailsPanel.Visibility == Visibility.Collapsed);
+                _cameraDetailsPanel.Visibility = isCollapsed ? Visibility.Visible : Visibility.Collapsed;
+                _btnToggleCamDetails.Content = isCollapsed ? "▲ 收起" : "⚙ 设置 ▼";
+            };
 
             // Lens selection row
             var lensRow = new DockPanel { Margin = new Thickness(0, 0, 0, 4) };
@@ -5735,7 +5770,7 @@ namespace WiFiAudioConnector
             lensGroup.Children.Add(_rbCamBack);
             lensGroup.Children.Add(_rbCamFront);
             lensRow.Children.Add(lensGroup);
-            cameraPanel.Children.Add(lensRow);
+            _cameraDetailsPanel.Children.Add(lensRow);
 
             // Resolution selection row
             var resRow = new DockPanel { Margin = new Thickness(0, 0, 0, 4) };
@@ -5754,7 +5789,7 @@ namespace WiFiAudioConnector
             resGroup.Children.Add(_rbCam1080P);
             resGroup.Children.Add(_rbCam720P);
             resRow.Children.Add(resGroup);
-            cameraPanel.Children.Add(resRow);
+            _cameraDetailsPanel.Children.Add(resRow);
 
             // FPS and Always On Top row
             var extraRow = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
@@ -5782,7 +5817,7 @@ namespace WiFiAudioConnector
             _cbCamAlwaysOnTop.Unchecked += async (s, e) => { _app.CurrentSettings.CameraAlwaysOnTop = false; _app.CurrentSettings.Save(); if (_app.IsCameraRunning) await _app.StartCameraAsync(); };
             extraGroup.Children.Add(_cbCamAlwaysOnTop);
             extraRow.Children.Add(extraGroup);
-            cameraPanel.Children.Add(extraRow);
+            _cameraDetailsPanel.Children.Add(extraRow);
 
             // Instructions / Tips
             var tipBorder = new Border
@@ -5801,7 +5836,9 @@ namespace WiFiAudioConnector
                 LineHeight = 14
             };
             tipBorder.Child = tbTip;
-            cameraPanel.Children.Add(tipBorder);
+            _cameraDetailsPanel.Children.Add(tipBorder);
+
+            cameraPanel.Children.Add(_cameraDetailsPanel);
 
             _cameraCard.Child = cameraPanel;
             root.Children.Add(_cameraCard);
@@ -5907,9 +5944,11 @@ namespace WiFiAudioConnector
 
             var scroll = new ScrollViewer
             {
-                VerticalScrollBarVisibility = ScrollBarVisibility.Auto,
+                VerticalScrollBarVisibility = ScrollBarVisibility.Hidden,
                 HorizontalScrollBarVisibility = ScrollBarVisibility.Disabled,
                 Focusable = false,
+                BorderThickness = new Thickness(0),
+                Background = System.Windows.Media.Brushes.Transparent,
                 Content = root
             };
             mainBorder.Child = scroll;
