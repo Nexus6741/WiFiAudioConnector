@@ -49,6 +49,37 @@ using System.IO.MemoryMappedFiles;
 
 namespace WiFiAudioConnector
 {
+    public static class UIHelper
+    {
+        public static FrameworkElement CreateIconText(string glyph, string text, double iconSize = 11, double textSize = 11, Thickness? iconMargin = null)
+        {
+            var pnl = new StackPanel
+            {
+                Orientation = Orientation.Horizontal,
+                HorizontalAlignment = HorizontalAlignment.Center,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            var tbIcon = new TextBlock
+            {
+                Text = glyph,
+                FontFamily = new FontFamily("Segoe MDL2 Assets, Segoe UI Symbol"),
+                FontSize = iconSize,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = iconMargin ?? new Thickness(0, 0, 4, 0)
+            };
+            var tbText = new TextBlock
+            {
+                Text = text,
+                FontFamily = new FontFamily("Microsoft YaHei UI, Segoe UI"),
+                FontSize = textSize,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            pnl.Children.Add(tbIcon);
+            pnl.Children.Add(tbText);
+            return pnl;
+        }
+    }
+
     public class DeviceItem
     {
         public string Name { get; set; }
@@ -2270,8 +2301,7 @@ namespace WiFiAudioConnector
             var listHeader = new DockPanel { Margin = new Thickness(0, 0, 0, 6) };
             var btnScan = new Button
             {
-                Content = "\uE72C 扫描在线设备",
-                FontFamily = new FontFamily("Segoe MDL2 Assets, Microsoft YaHei UI"),
+                Content = UIHelper.CreateIconText("\uE72C", "扫描在线设备", 10, 10),
                 FontSize = 10,
                 Padding = new Thickness(6, 2, 6, 2),
                 Background = new SolidColorBrush(Color.FromArgb(180, 50, 55, 68)),
@@ -2451,8 +2481,7 @@ namespace WiFiAudioConnector
 
             var btnApplyToItem = new Button
             {
-                Content = "\uE73E 确认设定",
-                FontFamily = new FontFamily("Segoe MDL2 Assets, Microsoft YaHei UI"),
+                Content = UIHelper.CreateIconText("\uE73E", "确认设定", 11, 11),
                 Width = 84,
                 Height = 26,
                 FontSize = 11,
@@ -2512,8 +2541,7 @@ namespace WiFiAudioConnector
             var bottomRow = new DockPanel();
             var btnSaveAll = new Button
             {
-                Content = "\uE74E 保存全部配置并生效",
-                FontFamily = new FontFamily("Segoe MDL2 Assets, Microsoft YaHei UI"),
+                Content = UIHelper.CreateIconText("\uE74E", "保存全部配置并生效", 12, 12),
                 Width = 160,
                 Height = 32,
                 FontSize = 12,
@@ -4935,13 +4963,16 @@ namespace WiFiAudioConnector
 
         public void ToggleFlyout()
         {
-            if (_flyout.IsVisible)
+            if (_flyout != null)
             {
-                _flyout.Hide();
-            }
-            else
-            {
-                ShowFlyout();
+                if (_flyout.IsVisible && !_flyout.IsHiding)
+                {
+                    _flyout.HideFlyout();
+                }
+                else
+                {
+                    ShowFlyout();
+                }
             }
         }
 
@@ -4953,9 +4984,10 @@ namespace WiFiAudioConnector
                 _flyout.SyncNotificationCheckbox();
                 _flyout.RefreshBatteryForSelectedDevice();
                 _flyout.UpdateCameraSegmentsUI();
+                _flyout.UpdateCodecSegmentsUI();
+                _flyout.UpdateLatencySegmentsUI();
+                _flyout.ShowFlyout();
             }
-            _flyout.Show();
-            _flyout.Activate();
         }
 
         private void PositionFlyoutAboveTray()
@@ -6236,17 +6268,25 @@ namespace WiFiAudioConnector
         private Border _statusBadge;
         private TextBlock _statusText;
         private Border _batteryBadge;
+        private TextBlock _batteryIcon;
         private TextBlock _batteryText;
         private Button _btnConnect;
         private ComboBox _cbDevices;
         private Button _btnScan;
         private Button _btnSwitchUsb;
-        private RadioButton _rbRaw;
-        private RadioButton _rbOpus320;
-        private RadioButton _rbOpus128;
-        private RadioButton _rbLatencyGame;
-        private RadioButton _rbLatencyBalanced;
-        private RadioButton _rbLatencySmooth;
+        private Button _btnCodecRaw;
+        private Button _btnCodecOpus320;
+        private Button _btnCodecOpus128;
+        private TextBlock _tbCodecDesc;
+        private Button _btnLatencyGame;
+        private Button _btnLatencyBalanced;
+        private Button _btnLatencySmooth;
+        private TextBlock _tbLatencyDesc;
+        private Border _mainBorder;
+        private TranslateTransform _windowTranslate;
+        private bool _isHiding = false;
+        private bool _isShowing = false;
+        public bool IsHiding { get { return _isHiding; } }
         private CheckBox _cbMutePhone;
         private Button _btnTriAudio;
         private Button _btnTriMic;
@@ -6415,12 +6455,12 @@ namespace WiFiAudioConnector
         protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
         {
             e.Cancel = true;
-            Hide();
+            HideFlyout();
         }
 
         private void BuildUI()
         {
-            Width = 390;
+            Width = 404;
             Height = Math.Min(880, Math.Max(640, SystemParameters.WorkArea.Height - 30));
             WindowStyle = WindowStyle.None;
             AllowsTransparency = true;
@@ -6444,16 +6484,19 @@ namespace WiFiAudioConnector
                 }
                 catch { }
 
-                Hide();
+                HideFlyout();
             };
 
-            var mainBorder = new Border
+            _windowTranslate = new TranslateTransform(0, 0);
+            _mainBorder = new Border
             {
                 Background = new SolidColorBrush(Color.FromArgb(246, 22, 25, 34)),
                 BorderBrush = new SolidColorBrush(Color.FromArgb(50, 255, 255, 255)),
                 BorderThickness = new Thickness(1),
                 CornerRadius = new CornerRadius(12),
                 Padding = new Thickness(16),
+                Margin = new Thickness(8, 8, 8, 20),
+                RenderTransform = _windowTranslate,
                 Effect = new DropShadowEffect
                 {
                     BlurRadius = 24,
@@ -6569,7 +6612,7 @@ namespace WiFiAudioConnector
                 Cursor = System.Windows.Input.Cursors.Hand,
                 VerticalAlignment = VerticalAlignment.Center
             };
-            btnHeaderClose.Click += (s, e) => Hide();
+            btnHeaderClose.Click += (s, e) => HideFlyout();
             DockPanel.SetDock(btnHeaderClose, Dock.Right);
 
             var btnHeaderSettings = new Button
@@ -6633,15 +6676,28 @@ namespace WiFiAudioConnector
                 Margin = new Thickness(0, 0, 6, 0),
                 Visibility = Visibility.Collapsed
             };
+            var batteryPanel = new StackPanel { Orientation = Orientation.Horizontal };
+            _batteryIcon = new TextBlock
+            {
+                Text = "\uE83F",
+                FontFamily = new FontFamily("Segoe MDL2 Assets, Segoe UI Symbol"),
+                FontSize = 11,
+                Foreground = System.Windows.Media.Brushes.White,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 4, 0)
+            };
             _batteryText = new TextBlock
             {
                 Text = "--%",
                 FontSize = 11,
                 FontWeight = FontWeights.SemiBold,
                 Foreground = System.Windows.Media.Brushes.White,
-                FontFamily = new FontFamily("Segoe MDL2 Assets, Microsoft YaHei UI")
+                FontFamily = new FontFamily("Microsoft YaHei UI, Segoe UI"),
+                VerticalAlignment = VerticalAlignment.Center
             };
-            _batteryBadge.Child = _batteryText;
+            batteryPanel.Children.Add(_batteryIcon);
+            batteryPanel.Children.Add(_batteryText);
+            _batteryBadge.Child = batteryPanel;
             DockPanel.SetDock(_batteryBadge, Dock.Left);
 
             row1.Children.Add(_statusBadge);
@@ -6652,11 +6708,9 @@ namespace WiFiAudioConnector
             var comboRow = new DockPanel { Margin = new Thickness(0, 0, 0, 8) };
             _btnScan = new Button
             {
-                Content = "\uE72C 刷新",
-                FontFamily = new FontFamily("Segoe MDL2 Assets, Microsoft YaHei UI"),
-                Width = 62,
+                Content = UIHelper.CreateIconText("\uE72C", "刷新", 11, 11),
+                Width = 64,
                 Height = 26,
-                FontSize = 11,
                 Background = new SolidColorBrush(Color.FromArgb(180, 50, 55, 68)),
                 Foreground = System.Windows.Media.Brushes.White,
                 BorderBrush = new SolidColorBrush(Color.FromArgb(60, 255, 255, 255)),
@@ -7388,9 +7442,9 @@ namespace WiFiAudioConnector
             mediaRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
             mediaRow.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
 
-            _btnMediaPrev = CreateMediaButton("\uE892 上一首", () => _app.SendMediaKey(88, "上一首"));
-            _btnMediaPlayPause = CreateMediaButton("\uE768 播放/暂停", () => _app.SendMediaKey(85, "播放 / 暂停"));
-            _btnMediaNext = CreateMediaButton("\uE893 下一首", () => _app.SendMediaKey(87, "下一首"));
+            _btnMediaPrev = CreateMediaButton("\uE892", "上一首", () => _app.SendMediaKey(88, "上一首"));
+            _btnMediaPlayPause = CreateMediaButton("\uE768", "播放/暂停", () => _app.SendMediaKey(85, "播放 / 暂停"));
+            _btnMediaNext = CreateMediaButton("\uE893", "下一首", () => _app.SendMediaKey(87, "下一首"));
 
             Grid.SetColumn(_btnMediaPrev, 0);
             Grid.SetColumn(_btnMediaPlayPause, 1);
@@ -7415,160 +7469,165 @@ namespace WiFiAudioConnector
                 Margin = new Thickness(0, 0, 0, 10)
             };
             var qualityPanel = new StackPanel();
-            qualityPanel.Children.Add(new TextBlock
+
+            // 1. Codec Segment Row
+            var codecHeader = new DockPanel { Margin = new Thickness(0, 0, 0, 4) };
+            var lblCodecTitle = new TextBlock
             {
-                Text = "传输音质设置",
-                FontSize = 12,
+                Text = "传输音质设置:",
+                FontSize = 11,
                 FontWeight = FontWeights.Bold,
                 Foreground = System.Windows.Media.Brushes.White,
-                Margin = new Thickness(0, 0, 0, 6)
-            });
-
-            _rbRaw = new RadioButton
-            {
-                GroupName = "CodecGroup",
-                Content = "Raw PCM (16-bit 48kHz 原生无损直通 - 推荐)",
-                Foreground = System.Windows.Media.Brushes.White,
-                FontSize = 11,
-                Margin = new Thickness(0, 2, 0, 4),
-                IsChecked = (_app.CurrentSettings.Codec == "raw")
+                VerticalAlignment = VerticalAlignment.Center
             };
-            _rbRaw.Checked += (s, e) =>
+            DockPanel.SetDock(lblCodecTitle, Dock.Left);
+            _tbCodecDesc = new TextBlock
+            {
+                FontSize = 10,
+                Foreground = new SolidColorBrush(Color.FromArgb(160, 148, 163, 184)),
+                HorizontalAlignment = HorizontalAlignment.Right,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            DockPanel.SetDock(_tbCodecDesc, Dock.Right);
+            codecHeader.Children.Add(lblCodecTitle);
+            codecHeader.Children.Add(_tbCodecDesc);
+            qualityPanel.Children.Add(codecHeader);
+
+            var codecSegBorder = new Border
+            {
+                Background = new SolidColorBrush(Color.FromArgb(220, 15, 17, 24)),
+                BorderBrush = new SolidColorBrush(Color.FromArgb(40, 255, 255, 255)),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(6),
+                Padding = new Thickness(2),
+                Margin = new Thickness(0, 0, 0, 8)
+            };
+            var codecSegGrid = new System.Windows.Controls.Primitives.UniformGrid { Rows = 1, Columns = 3 };
+            _btnCodecRaw = CreateSegmentButton("Raw PCM 无损");
+            _btnCodecOpus320 = CreateSegmentButton("Opus 320K");
+            _btnCodecOpus128 = CreateSegmentButton("Opus 128K");
+
+            _btnCodecRaw.Click += (s, e) =>
             {
                 if (_app.CurrentSettings.Codec == "raw") return;
                 _app.CurrentSettings.Codec = "raw";
                 _app.CurrentSettings.Save();
+                UpdateCodecSegmentsUI();
                 if (_app.IsScrcpyConnected)
                 {
                     _app.ReloadAudioStreamAsync("已切换音质: Raw PCM 原生无损");
                 }
             };
-            qualityPanel.Children.Add(_rbRaw);
-
-            _rbOpus320 = new RadioButton
-            {
-                GroupName = "CodecGroup",
-                Content = "Opus 320K (高码率广播级，极低带宽占用)",
-                Foreground = System.Windows.Media.Brushes.White,
-                FontSize = 11,
-                Margin = new Thickness(0, 2, 0, 4),
-                IsChecked = (_app.CurrentSettings.Codec == "opus320")
-            };
-            _rbOpus320.Checked += (s, e) =>
+            _btnCodecOpus320.Click += (s, e) =>
             {
                 if (_app.CurrentSettings.Codec == "opus320") return;
                 _app.CurrentSettings.Codec = "opus320";
                 _app.CurrentSettings.Save();
+                UpdateCodecSegmentsUI();
                 if (_app.IsScrcpyConnected)
                 {
                     _app.ReloadAudioStreamAsync("已切换音质: Opus 320K 广播级");
                 }
             };
-            qualityPanel.Children.Add(_rbOpus320);
-
-            _rbOpus128 = new RadioButton
-            {
-                GroupName = "CodecGroup",
-                Content = "Opus 128K (极限低延迟与省电)",
-                Foreground = System.Windows.Media.Brushes.White,
-                FontSize = 11,
-                Margin = new Thickness(0, 2, 0, 2),
-                IsChecked = (_app.CurrentSettings.Codec == "opus128")
-            };
-            _rbOpus128.Checked += (s, e) =>
+            _btnCodecOpus128.Click += (s, e) =>
             {
                 if (_app.CurrentSettings.Codec == "opus128") return;
                 _app.CurrentSettings.Codec = "opus128";
                 _app.CurrentSettings.Save();
+                UpdateCodecSegmentsUI();
                 if (_app.IsScrcpyConnected)
                 {
                     _app.ReloadAudioStreamAsync("已切换音质: Opus 128K 极限省电");
                 }
             };
-            qualityPanel.Children.Add(_rbOpus128);
 
-            qualityPanel.Children.Add(new Separator
-            {
-                Margin = new Thickness(0, 7, 0, 7),
-                Background = new SolidColorBrush(Color.FromArgb(40, 255, 255, 255))
-            });
+            codecSegGrid.Children.Add(_btnCodecRaw);
+            codecSegGrid.Children.Add(_btnCodecOpus320);
+            codecSegGrid.Children.Add(_btnCodecOpus128);
+            codecSegBorder.Child = codecSegGrid;
+            qualityPanel.Children.Add(codecSegBorder);
 
-            qualityPanel.Children.Add(new TextBlock
+            // 2. Latency Segment Row
+            var latencyHeader = new DockPanel { Margin = new Thickness(0, 0, 0, 4) };
+            var lblLatencyTitle = new TextBlock
             {
-                Text = "音频缓冲延迟",
-                FontSize = 12,
+                Text = "音频缓冲延迟:",
+                FontSize = 11,
                 FontWeight = FontWeights.Bold,
                 Foreground = System.Windows.Media.Brushes.White,
-                Margin = new Thickness(0, 0, 0, 6)
-            });
-
-            _rbLatencyGame = new RadioButton
-            {
-                GroupName = "LatencyGroup",
-                Content = "电竞极速档 (30ms - 音画近乎完全同步)",
-                Foreground = System.Windows.Media.Brushes.White,
-                FontSize = 11,
-                Margin = new Thickness(0, 2, 0, 4),
-                IsChecked = (_app.CurrentSettings.LatencyMode == "game")
+                VerticalAlignment = VerticalAlignment.Center
             };
-            _rbLatencyGame.Checked += (s, e) =>
+            DockPanel.SetDock(lblLatencyTitle, Dock.Left);
+            _tbLatencyDesc = new TextBlock
+            {
+                FontSize = 10,
+                Foreground = new SolidColorBrush(Color.FromArgb(160, 148, 163, 184)),
+                HorizontalAlignment = HorizontalAlignment.Right,
+                VerticalAlignment = VerticalAlignment.Center
+            };
+            DockPanel.SetDock(_tbLatencyDesc, Dock.Right);
+            latencyHeader.Children.Add(lblLatencyTitle);
+            latencyHeader.Children.Add(_tbLatencyDesc);
+            qualityPanel.Children.Add(latencyHeader);
+
+            var latencySegBorder = new Border
+            {
+                Background = new SolidColorBrush(Color.FromArgb(220, 15, 17, 24)),
+                BorderBrush = new SolidColorBrush(Color.FromArgb(40, 255, 255, 255)),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(6),
+                Padding = new Thickness(2),
+                Margin = new Thickness(0, 0, 0, 8)
+            };
+            var latencySegGrid = new System.Windows.Controls.Primitives.UniformGrid { Rows = 1, Columns = 3 };
+            _btnLatencyGame = CreateSegmentButton("极速 30ms");
+            _btnLatencyBalanced = CreateSegmentButton("均衡 50ms");
+            _btnLatencySmooth = CreateSegmentButton("穿墙 80ms");
+
+            _btnLatencyGame.Click += (s, e) =>
             {
                 if (_app.CurrentSettings.LatencyMode == "game") return;
                 _app.CurrentSettings.LatencyMode = "game";
                 _app.CurrentSettings.Save();
+                UpdateLatencySegmentsUI();
                 if (_app.IsScrcpyConnected)
                 {
                     _app.ReloadAudioStreamAsync("已切换延迟: 电竞极速档 (30ms)");
                 }
             };
-            qualityPanel.Children.Add(_rbLatencyGame);
-
-            _rbLatencyBalanced = new RadioButton
-            {
-                GroupName = "LatencyGroup",
-                Content = "均衡推荐档 (50ms - 兼顾流畅与抗波动 - 默认)",
-                Foreground = System.Windows.Media.Brushes.White,
-                FontSize = 11,
-                Margin = new Thickness(0, 2, 0, 4),
-                IsChecked = (_app.CurrentSettings.LatencyMode == "balanced" || string.IsNullOrEmpty(_app.CurrentSettings.LatencyMode))
-            };
-            _rbLatencyBalanced.Checked += (s, e) =>
+            _btnLatencyBalanced.Click += (s, e) =>
             {
                 if (_app.CurrentSettings.LatencyMode == "balanced") return;
                 _app.CurrentSettings.LatencyMode = "balanced";
                 _app.CurrentSettings.Save();
+                UpdateLatencySegmentsUI();
                 if (_app.IsScrcpyConnected)
                 {
                     _app.ReloadAudioStreamAsync("已切换延迟: 均衡推荐档 (50ms)");
                 }
             };
-            qualityPanel.Children.Add(_rbLatencyBalanced);
-
-            _rbLatencySmooth = new RadioButton
-            {
-                GroupName = "LatencyGroup",
-                Content = "穿墙防卡顿档 (80ms - 针对 2.4G Wi-Fi 与弱网环境)",
-                Foreground = System.Windows.Media.Brushes.White,
-                FontSize = 11,
-                Margin = new Thickness(0, 2, 0, 2),
-                IsChecked = (_app.CurrentSettings.LatencyMode == "smooth")
-            };
-            _rbLatencySmooth.Checked += (s, e) =>
+            _btnLatencySmooth.Click += (s, e) =>
             {
                 if (_app.CurrentSettings.LatencyMode == "smooth") return;
                 _app.CurrentSettings.LatencyMode = "smooth";
                 _app.CurrentSettings.Save();
+                UpdateLatencySegmentsUI();
                 if (_app.IsScrcpyConnected)
                 {
                     _app.ReloadAudioStreamAsync("已切换延迟: 穿墙防卡顿档 (80ms)");
                 }
             };
-            qualityPanel.Children.Add(_rbLatencySmooth);
+
+            latencySegGrid.Children.Add(_btnLatencyGame);
+            latencySegGrid.Children.Add(_btnLatencyBalanced);
+            latencySegGrid.Children.Add(_btnLatencySmooth);
+            latencySegBorder.Child = latencySegGrid;
+            qualityPanel.Children.Add(latencySegBorder);
 
             qualityPanel.Children.Add(new Separator
             {
-                Margin = new Thickness(0, 7, 0, 7),
-                Background = new SolidColorBrush(Color.FromArgb(40, 255, 255, 255))
+                Margin = new Thickness(0, 2, 0, 6),
+                Background = new SolidColorBrush(Color.FromArgb(35, 255, 255, 255))
             });
 
             _cbMutePhone = new CheckBox
@@ -8087,11 +8146,9 @@ namespace WiFiAudioConnector
             var hotkeyRow = new DockPanel { Margin = new Thickness(0, 0, 0, 0) };
             var btnConfigHotkey = new Button
             {
-                Content = "\uE713 快捷键",
-                FontFamily = new FontFamily("Segoe MDL2 Assets, Microsoft YaHei UI"),
-                Width = 68,
-                Height = 22,
-                FontSize = 11,
+                Content = UIHelper.CreateIconText("\uE713", "快捷键", 11, 11),
+                Width = 72,
+                Height = 24,
                 Background = new SolidColorBrush(Color.FromArgb(180, 50, 55, 68)),
                 Foreground = System.Windows.Media.Brushes.White,
                 BorderBrush = new SolidColorBrush(Color.FromArgb(80, 255, 255, 255)),
@@ -8135,16 +8192,18 @@ namespace WiFiAudioConnector
                 Background = System.Windows.Media.Brushes.Transparent,
                 Content = root
             };
-            mainBorder.Child = scroll;
-            Content = mainBorder;
+            _mainBorder.Child = scroll;
+            Content = _mainBorder;
 
+            UpdateCodecSegmentsUI();
+            UpdateLatencySegmentsUI();
             UpdateState(ConnectionState.Disconnected);
         }
 
         public async void TriggerScan()
         {
             _btnScan.IsEnabled = false;
-            _btnScan.Content = "扫描中..";
+            _btnScan.Content = UIHelper.CreateIconText("\uE72C", "扫描中", 11, 11);
 
             var discovered = await _app.ScanDevicesAsync();
 
@@ -8222,7 +8281,7 @@ namespace WiFiAudioConnector
             }
 
             _btnScan.IsEnabled = true;
-            _btnScan.Content = "\uE72C 刷新";
+            _btnScan.Content = UIHelper.CreateIconText("\uE72C", "刷新", 11, 11);
             _btnScan.ToolTip = string.Format("上次扫描: 发现 {0} 台设备\n局域网网段: {1}\n扫描端口: {2}",
                 discovered.Count,
                 AdbLanScanner.LastScannedSubnet ?? "未检测到",
@@ -8471,6 +8530,8 @@ namespace WiFiAudioConnector
                 }
 
                 UpdateCameraSegmentsUI();
+                UpdateCodecSegmentsUI();
+                UpdateLatencySegmentsUI();
                 UpdateTriButtonStates();
             };
 
@@ -8499,14 +8560,12 @@ namespace WiFiAudioConnector
             }
         }
 
-        private Button CreateMediaButton(string text, Action onClick)
+        private Button CreateMediaButton(string glyph, string text, Action onClick)
         {
             var btn = new Button
             {
-                Content = text,
-                FontFamily = new FontFamily("Segoe MDL2 Assets, Microsoft YaHei UI"),
+                Content = UIHelper.CreateIconText(glyph, text, 11, 11),
                 Height = 26,
-                FontSize = 11,
                 Background = new SolidColorBrush(Color.FromArgb(160, 36, 40, 52)),
                 Foreground = System.Windows.Media.Brushes.White,
                 BorderThickness = new Thickness(1),
@@ -8579,7 +8638,7 @@ namespace WiFiAudioConnector
         {
             Dispatcher.BeginInvoke(new Action(() =>
             {
-                if (_batteryBadge == null || _batteryText == null) return;
+                if (_batteryBadge == null || _batteryText == null || _batteryIcon == null) return;
                 var cur = _cbDevices != null ? _cbDevices.SelectedItem as DeviceItem : null;
                 if (cur != null && (cur.IsBluetooth || cur.IsCustom || string.IsNullOrEmpty(cur.Target)))
                 {
@@ -8608,7 +8667,8 @@ namespace WiFiAudioConnector
                     chargeDesc = "电量偏低";
                 }
 
-                _batteryText.Text = string.Format("{0} {1}% ({2})", icon, info.Level, chargeDesc);
+                _batteryIcon.Text = icon;
+                _batteryText.Text = string.Format("{0}% ({1})", info.Level, chargeDesc);
 
                 if (info.IsCharging)
                 {
@@ -8795,7 +8855,7 @@ namespace WiFiAudioConnector
             else Dispatcher.BeginInvoke(act);
         }
 
-        private Button CreateCameraSegmentButton(string text)
+        private Button CreateSegmentButton(string text)
         {
             var btn = new Button
             {
@@ -8817,6 +8877,11 @@ namespace WiFiAudioConnector
             return btn;
         }
 
+        private Button CreateCameraSegmentButton(string text)
+        {
+            return CreateSegmentButton(text);
+        }
+
         private void SetSegmentActive(Button btn, bool active)
         {
             if (btn == null) return;
@@ -8831,6 +8896,144 @@ namespace WiFiAudioConnector
                 btn.Background = System.Windows.Media.Brushes.Transparent;
                 btn.Foreground = new SolidColorBrush(Color.FromArgb(180, 160, 170, 190));
                 btn.FontWeight = FontWeights.Normal;
+            }
+        }
+
+        public void UpdateCodecSegmentsUI()
+        {
+            Action act = () =>
+            {
+                string codec = _app.CurrentSettings.Codec;
+                bool isRaw = (codec == "raw" || string.IsNullOrEmpty(codec));
+                bool is320 = (codec == "opus320");
+                bool is128 = (codec == "opus128");
+
+                SetSegmentActive(_btnCodecRaw, isRaw);
+                SetSegmentActive(_btnCodecOpus320, is320);
+                SetSegmentActive(_btnCodecOpus128, is128);
+
+                if (_tbCodecDesc != null)
+                {
+                    if (isRaw) _tbCodecDesc.Text = "16-bit 48kHz 原生无损直通 · 推荐";
+                    else if (is320) _tbCodecDesc.Text = "广播级音质 · 极低带宽占用";
+                    else _tbCodecDesc.Text = "极限低延迟与省电模式";
+                }
+            };
+            if (CheckAccess()) act();
+            else Dispatcher.BeginInvoke(act);
+        }
+
+        public void UpdateLatencySegmentsUI()
+        {
+            Action act = () =>
+            {
+                string lat = _app.CurrentSettings.LatencyMode;
+                bool isGame = (lat == "game");
+                bool isSmooth = (lat == "smooth");
+                bool isBalanced = (!isGame && !isSmooth);
+
+                SetSegmentActive(_btnLatencyGame, isGame);
+                SetSegmentActive(_btnLatencyBalanced, isBalanced);
+                SetSegmentActive(_btnLatencySmooth, isSmooth);
+
+                if (_tbLatencyDesc != null)
+                {
+                    if (isGame) _tbLatencyDesc.Text = "30ms 电竞极速 · 音画近乎完全同步";
+                    else if (isSmooth) _tbLatencyDesc.Text = "80ms 穿墙防卡 · 适应弱网与2.4G";
+                    else _tbLatencyDesc.Text = "50ms 均衡推荐 · 兼顾流畅与低延迟";
+                }
+            };
+            if (CheckAccess()) act();
+            else Dispatcher.BeginInvoke(act);
+        }
+
+        public void ShowFlyout()
+        {
+            if (_isShowing) return;
+            _isHiding = false;
+            _isShowing = true;
+
+            base.Show();
+            try
+            {
+                Topmost = true;
+                Activate();
+            }
+            catch { }
+
+            double startY = _windowTranslate != null && _windowTranslate.Y > 0 ? _windowTranslate.Y : 20.0;
+            double startOpacity = Opacity < 1.0 ? Opacity : 0.0;
+
+            var ease = new CubicEase { EasingMode = EasingMode.EaseOut };
+
+            var fadeAnim = new DoubleAnimation
+            {
+                From = startOpacity,
+                To = 1.0,
+                Duration = TimeSpan.FromMilliseconds(220),
+                EasingFunction = ease
+            };
+
+            var slideAnim = new DoubleAnimation
+            {
+                From = startY,
+                To = 0.0,
+                Duration = TimeSpan.FromMilliseconds(220),
+                EasingFunction = ease
+            };
+            slideAnim.Completed += (s, e) =>
+            {
+                _isShowing = false;
+            };
+
+            BeginAnimation(OpacityProperty, fadeAnim);
+            if (_windowTranslate != null)
+            {
+                _windowTranslate.BeginAnimation(TranslateTransform.YProperty, slideAnim);
+            }
+        }
+
+        public void HideFlyout()
+        {
+            if (_isHiding || !IsVisible) return;
+            _isHiding = true;
+            _isShowing = false;
+
+            var ease = new CubicEase { EasingMode = EasingMode.EaseIn };
+
+            var fadeAnim = new DoubleAnimation
+            {
+                To = 0.0,
+                Duration = TimeSpan.FromMilliseconds(160),
+                EasingFunction = ease
+            };
+
+            var slideAnim = new DoubleAnimation
+            {
+                To = 18.0,
+                Duration = TimeSpan.FromMilliseconds(160),
+                EasingFunction = ease
+            };
+            slideAnim.Completed += (s, e) =>
+            {
+                if (_isHiding)
+                {
+                    _isHiding = false;
+                    base.Hide();
+                    if (_windowTranslate != null)
+                    {
+                        _windowTranslate.BeginAnimation(TranslateTransform.YProperty, null);
+                        _windowTranslate.Y = 0;
+                    }
+                    BeginAnimation(OpacityProperty, null);
+                    Opacity = 1.0;
+                }
+            };
+
+            BeginAnimation(OpacityProperty, fadeAnim);
+            if (_windowTranslate != null)
+            {
+                _windowTranslate.BeginAnimation(TranslateTransform.YProperty, slideAnim);
             }
         }
 
