@@ -3472,7 +3472,7 @@ namespace WiFiAudioConnector
             }
         }
 
-        public async void ConnectAsync(string specificTarget = null, string specificName = null)
+        public async Task<bool> ConnectAsync(string specificTarget = null, string specificName = null)
         {
             string target = !string.IsNullOrEmpty(specificTarget) ? specificTarget : _settings.Target;
             string devName = !string.IsNullOrEmpty(specificName) ? specificName : _settings.DeviceName;
@@ -3480,8 +3480,8 @@ namespace WiFiAudioConnector
 
             if (isBt)
             {
-                if (_isConnectingBt) return;
-                if (IsBluetoothConnected && string.Equals(_currentBtTarget, target, StringComparison.OrdinalIgnoreCase)) return;
+                if (_isConnectingBt) return false;
+                if (IsBluetoothConnected && string.Equals(_currentBtTarget, target, StringComparison.OrdinalIgnoreCase)) return true;
 
                 _isConnectingBt = true;
                 _flyout.UpdateState(ConnectionState.Connecting);
@@ -3521,12 +3521,12 @@ namespace WiFiAudioConnector
                     UpdateOverallState();
                     ShowNotification("蓝牙连接失败", "无法连接到该蓝牙音频设备，请确认手机已开机、开启蓝牙并处于配对范围", ToolTipIcon.Error);
                 }
-                return;
+                return btOk;
             }
 
             // Scrcpy (Wi-Fi or USB)
-            if (_isConnectingScrcpy) return;
-            if (IsScrcpyConnected && string.Equals(_currentScrcpyTarget, target, StringComparison.OrdinalIgnoreCase)) return;
+            if (_isConnectingScrcpy) return false;
+            if (IsScrcpyConnected && string.Equals(_currentScrcpyTarget, target, StringComparison.OrdinalIgnoreCase)) return true;
 
             string adbPath = FindToolPath("adb.exe");
             string scrcpyPath = FindToolPath("scrcpy.exe");
@@ -3535,7 +3535,7 @@ namespace WiFiAudioConnector
             {
                 _flyout.UpdateState(ConnectionState.Disconnected);
                 MessageBox.Show("未能找到 scrcpy 或 adb 组件！请确保程序目录下存在 scrcpy.exe 与 adb.exe。", "错误", MessageBoxButton.OK, MessageBoxImage.Error);
-                return;
+                return false;
             }
 
             _isConnectingScrcpy = true;
@@ -3658,6 +3658,7 @@ namespace WiFiAudioConnector
                         DisconnectScrcpy(false);
                     }));
                 });
+                return true;
             }
             else
             {
@@ -3666,6 +3667,7 @@ namespace WiFiAudioConnector
                 _currentScrcpyDeviceName = null;
                 UpdateOverallState();
                 ShowNotification("连接失败", "无法连接到设备，请确认手机已开机且处于连接状态", ToolTipIcon.Error);
+                return false;
             }
         }
 
@@ -4547,16 +4549,22 @@ namespace WiFiAudioConnector
             });
         }
 
-        public async void ToggleCamera()
+        public async Task<bool> ToggleCameraAsync()
         {
             if (IsCameraRunning)
             {
                 StopCamera();
+                return false;
             }
             else
             {
-                await StartCameraAsync();
+                return await StartCameraAsync();
             }
+        }
+
+        public async void ToggleCamera()
+        {
+            await ToggleCameraAsync();
         }
 
         public async Task<bool> StartCameraAsync(string specificTarget = null, string specificName = null)
@@ -4615,7 +4623,7 @@ namespace WiFiAudioConnector
             string topArg = _settings.CameraAlwaysOnTop ? "--always-on-top" : "";
             string titleArg = string.Format("--window-title=\"📷 手机无线摄像头 - [{0}]\"", devName);
 
-            string args = string.Format("-s {0} --video-source=camera --camera-facing={1} --camera-size={2} --camera-fps={3} {4} --no-audio {5}",
+            string args = string.Format("-s {0} --video-source=camera --camera-facing={1} --camera-size={2} --camera-fps={3} {4} --no-audio --window-width=640 --window-height=360 {5}",
                 target, facing, size, fps, topArg, titleArg);
 
             bool ok = await Task.Run<bool>(() =>
@@ -4626,7 +4634,7 @@ namespace WiFiAudioConnector
                     {
                         FileName = scrcpyPath,
                         Arguments = args,
-                        CreateNoWindow = false,
+                        CreateNoWindow = true,
                         UseShellExecute = false,
                         WindowStyle = ProcessWindowStyle.Normal
                     };
@@ -4637,7 +4645,7 @@ namespace WiFiAudioConnector
                     // If resolution fails on some older phones, fallback to 720P automatically
                     if (_cameraProc == null || _cameraProc.HasExited)
                     {
-                        string fallbackArgs = string.Format("-s {0} --video-source=camera --camera-facing={1} --camera-size=1280x720 --camera-fps=30 {2} --no-audio {3}",
+                        string fallbackArgs = string.Format("-s {0} --video-source=camera --camera-facing={1} --camera-size=1280x720 --camera-fps=30 {2} --no-audio --window-width=640 --window-height=360 {3}",
                             target, facing, topArg, titleArg);
                         psi.Arguments = fallbackArgs;
                         _cameraProc = Process.Start(psi);
@@ -4939,6 +4947,11 @@ namespace WiFiAudioConnector
         private bool _isProgrammaticTextChange = false;
         private TextBlock _txtHotkeyDisplay;
         private List<DeviceItem> _deviceList = new List<DeviceItem>();
+        private bool _isAudioToggling = false;
+        private bool _isMicToggling = false;
+        private bool _isCameraToggling = false;
+        private bool _isConnecting = false;
+        private bool _isActionInProgress = false;
 
         public FlyoutWindow(App app)
         {
@@ -4966,6 +4979,7 @@ namespace WiFiAudioConnector
             Deactivated += (s, e) =>
             {
                 if (_app != null && _app.IsReloading) return;
+                if (_isActionInProgress || _isAudioToggling || _isMicToggling || _isCameraToggling || _isConnecting) return;
 
                 try
                 {
@@ -5258,19 +5272,49 @@ namespace WiFiAudioConnector
                 BorderThickness = new Thickness(0),
                 Cursor = System.Windows.Input.Cursors.Hand
             };
-            _btnConnect.Click += (s, e) =>
+            _btnConnect.Click += async (s, e) =>
             {
+                if (_isConnecting) return;
+                _isConnecting = true;
+                _isActionInProgress = true;
+                _btnConnect.IsEnabled = false;
+
                 var sel = _cbDevices != null ? _cbDevices.SelectedItem as DeviceItem : null;
                 string target = (sel != null && !string.IsNullOrEmpty(sel.Target)) ? sel.Target : _app.CurrentSettings.Target;
                 string devName = (sel != null && !string.IsNullOrEmpty(sel.Name)) ? sel.Name : _app.CurrentSettings.DeviceName;
 
-                if (_app.IsTargetConnected(target))
+                bool isConnected = _app.IsTargetConnected(target);
+                _btnConnect.Content = isConnected ? "断开中..." : "连接中...";
+                _btnConnect.Background = new SolidColorBrush(Color.FromArgb(235, 217, 119, 6)); // Amber #D97706
+
+                try
                 {
-                    _app.Disconnect(target);
+                    if (isConnected)
+                    {
+                        _app.Disconnect(target);
+                    }
+                    else
+                    {
+                        await _app.ConnectAsync(target, devName);
+                    }
+                    await Task.Delay(400);
                 }
-                else
+                catch (Exception ex)
                 {
-                    _app.ConnectAsync(target, devName);
+                    App.LogLine("Connect button error: " + ex.Message);
+                }
+                finally
+                {
+                    _isConnecting = false;
+                    _isActionInProgress = false;
+                    _btnConnect.IsEnabled = true;
+                    UpdateUIState();
+                    try
+                    {
+                        Topmost = true;
+                        Activate();
+                    }
+                    catch { }
                 }
             };
             devicePanel.Children.Add(_btnConnect);
@@ -5295,22 +5339,53 @@ namespace WiFiAudioConnector
                 Cursor = System.Windows.Input.Cursors.Hand,
                 ToolTip = "点击开启/关闭手机系统音频推流\n手机扬声器静音，电脑音箱同步播放"
             };
-            _btnTriAudio.Click += (s, e) =>
+            _btnTriAudio.Click += async (s, e) =>
             {
-                if (_app.IsScrcpyConnected)
+                if (_isAudioToggling) return;
+                _isAudioToggling = true;
+                _isActionInProgress = true;
+                _btnTriAudio.IsEnabled = false;
+
+                bool isAudioOn = _app.IsScrcpyConnected || _app.IsBluetoothConnected;
+                _btnTriAudio.Content = isAudioOn ? "🔊 关闭中..." : "🔊 开启中...";
+                _btnTriAudio.Background = new SolidColorBrush(Color.FromArgb(235, 217, 119, 6)); // Amber #D97706
+                _btnTriAudio.Foreground = System.Windows.Media.Brushes.White;
+
+                try
                 {
-                    _app.DisconnectScrcpy(true);
+                    if (_app.IsScrcpyConnected)
+                    {
+                        _app.DisconnectScrcpy(true);
+                    }
+                    else if (_app.IsBluetoothConnected)
+                    {
+                        _app.DisconnectBluetooth(true);
+                    }
+                    else
+                    {
+                        var sel = _cbDevices != null ? _cbDevices.SelectedItem as DeviceItem : null;
+                        string target = (sel != null && !string.IsNullOrEmpty(sel.Target)) ? sel.Target : _app.CurrentSettings.Target;
+                        string devName = (sel != null && !string.IsNullOrEmpty(sel.Name)) ? sel.Name : _app.CurrentSettings.DeviceName;
+                        await _app.ConnectAsync(target, devName);
+                    }
+                    await Task.Delay(400);
                 }
-                else if (_app.IsBluetoothConnected)
+                catch (Exception ex)
                 {
-                    _app.DisconnectBluetooth(true);
+                    App.LogLine("TriAudio toggle error: " + ex.Message);
                 }
-                else
+                finally
                 {
-                    var sel = _cbDevices != null ? _cbDevices.SelectedItem as DeviceItem : null;
-                    string target = (sel != null && !string.IsNullOrEmpty(sel.Target)) ? sel.Target : _app.CurrentSettings.Target;
-                    string devName = (sel != null && !string.IsNullOrEmpty(sel.Name)) ? sel.Name : _app.CurrentSettings.DeviceName;
-                    _app.ConnectAsync(target, devName);
+                    _isAudioToggling = false;
+                    _isActionInProgress = false;
+                    _btnTriAudio.IsEnabled = true;
+                    UpdateTriButtonStates();
+                    try
+                    {
+                        Topmost = true;
+                        Activate();
+                    }
+                    catch { }
                 }
             };
 
@@ -5328,17 +5403,48 @@ namespace WiFiAudioConnector
             };
             _btnTriMic.Click += async (s, e) =>
             {
-                if (_app.IsMicRunning)
+                if (_isMicToggling) return;
+                _isMicToggling = true;
+                _isActionInProgress = true;
+                _btnTriMic.IsEnabled = false;
+
+                bool micOn = _app.IsMicRunning;
+                _btnTriMic.Content = micOn ? "🎙️ 关闭中..." : "🎙️ 开启中...";
+                _btnTriMic.Background = new SolidColorBrush(Color.FromArgb(235, 217, 119, 6)); // Amber #D97706
+                _btnTriMic.Foreground = System.Windows.Media.Brushes.White;
+
+                try
                 {
-                    _app.CurrentSettings.MicDirectMode = false;
-                    _app.CurrentSettings.Save();
-                    _app.StopMicStream(true);
+                    if (micOn)
+                    {
+                        _app.CurrentSettings.MicDirectMode = false;
+                        _app.CurrentSettings.Save();
+                        _app.StopMicStream(true);
+                    }
+                    else
+                    {
+                        _app.CurrentSettings.MicDirectMode = true;
+                        _app.CurrentSettings.Save();
+                        await _app.StartMicStreamAsync();
+                    }
+                    await Task.Delay(400);
                 }
-                else
+                catch (Exception ex)
                 {
-                    _app.CurrentSettings.MicDirectMode = true;
-                    _app.CurrentSettings.Save();
-                    await _app.StartMicStreamAsync();
+                    App.LogLine("TriMic toggle error: " + ex.Message);
+                }
+                finally
+                {
+                    _isMicToggling = false;
+                    _isActionInProgress = false;
+                    _btnTriMic.IsEnabled = true;
+                    UpdateTriButtonStates();
+                    try
+                    {
+                        Topmost = true;
+                        Activate();
+                    }
+                    catch { }
                 }
             };
 
@@ -5354,9 +5460,47 @@ namespace WiFiAudioConnector
                 Cursor = System.Windows.Input.Cursors.Hand,
                 ToolTip = "左键: 开关无线摄像头 (默认 1080P 30FPS)\n右键: 配置镜头方向、分辨率与帧率"
             };
-            _btnTriCamera.Click += (s, e) =>
+            _btnTriCamera.Click += async (s, e) =>
             {
-                _app.ToggleCamera();
+                if (_isCameraToggling) return;
+                _isCameraToggling = true;
+                _isActionInProgress = true;
+                _btnTriCamera.IsEnabled = false;
+
+                bool camOn = _app.IsCameraRunning;
+                _btnTriCamera.Content = camOn ? "📷 关闭中..." : "📷 开启中...";
+                _btnTriCamera.Background = new SolidColorBrush(Color.FromArgb(235, 217, 119, 6)); // Amber #D97706
+                _btnTriCamera.Foreground = System.Windows.Media.Brushes.White;
+
+                try
+                {
+                    if (camOn)
+                    {
+                        _app.StopCamera();
+                    }
+                    else
+                    {
+                        await _app.StartCameraAsync();
+                    }
+                    await Task.Delay(400);
+                }
+                catch (Exception ex)
+                {
+                    App.LogLine("TriCamera toggle error: " + ex.Message);
+                }
+                finally
+                {
+                    _isCameraToggling = false;
+                    _isActionInProgress = false;
+                    _btnTriCamera.IsEnabled = true;
+                    UpdateTriButtonStates();
+                    try
+                    {
+                        Topmost = true;
+                        Activate();
+                    }
+                    catch { }
+                }
             };
 
             // Setup right-click ContextMenu on Camera Button for resolution, lens, fps
@@ -6180,15 +6324,18 @@ namespace WiFiAudioConnector
                 var sel = _cbDevices != null ? _cbDevices.SelectedItem as DeviceItem : null;
                 bool isSelConnected = (sel != null && !string.IsNullOrEmpty(sel.Target) && _app.IsTargetConnected(sel.Target));
 
-                if (isSelConnected)
+                if (!_isConnecting)
                 {
-                    _btnConnect.Content = "断开此设备";
-                    _btnConnect.Background = new SolidColorBrush(Color.FromArgb(220, 215, 60, 60));
-                }
-                else
-                {
-                    _btnConnect.Content = (scrcpyOn || btOn) ? "连接此设备 (双路并发)" : "一键连接";
-                    _btnConnect.Background = new SolidColorBrush(Color.FromArgb(255, 20, 120, 240));
+                    if (isSelConnected)
+                    {
+                        _btnConnect.Content = "断开此设备";
+                        _btnConnect.Background = new SolidColorBrush(Color.FromArgb(220, 215, 60, 60));
+                    }
+                    else
+                    {
+                        _btnConnect.Content = (scrcpyOn || btOn) ? "连接此设备 (双路并发)" : "一键连接";
+                        _btnConnect.Background = new SolidColorBrush(Color.FromArgb(255, 20, 120, 240));
+                    }
                 }
 
                 if (sel != null)
@@ -6532,7 +6679,7 @@ namespace WiFiAudioConnector
                 bool camOn = _app.IsCameraRunning;
 
                 // 1. Audio Button
-                if (_btnTriAudio != null)
+                if (_btnTriAudio != null && !_isAudioToggling)
                 {
                     if (audioOn)
                     {
@@ -6551,7 +6698,7 @@ namespace WiFiAudioConnector
                 }
 
                 // 2. Microphone Button
-                if (_btnTriMic != null)
+                if (_btnTriMic != null && !_isMicToggling)
                 {
                     if (micOn)
                     {
@@ -6581,7 +6728,7 @@ namespace WiFiAudioConnector
                 }
 
                 // 3. Camera Button
-                if (_btnTriCamera != null)
+                if (_btnTriCamera != null && !_isCameraToggling)
                 {
                     if (camOn)
                     {
