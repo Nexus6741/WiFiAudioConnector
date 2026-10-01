@@ -6095,15 +6095,18 @@ namespace WiFiAudioConnector
         private Border _camCard;
         private Button _btnCamFacingBack;
         private Button _btnCamFacingFront;
+        private Button _btnCamRes4k;
         private Button _btnCamRes1080;
         private Button _btnCamRes720;
+        private Button _btnCamFps24;
+        private Button _btnCamFps30;
+        private Button _btnCamFps60;
         private Button _btnCamRot0;
         private Button _btnCamRot90;
         private Button _btnCamRot180;
         private Button _btnCamRot270;
         private CheckBox _cbCamMirror;
         private CheckBox _cbCamOnDemand;
-        private CheckBox _cbCam60Fps;
         private CheckBox _cbCamVirtual;
         private CheckBox _cbCamPreview;
         private CheckBox _cbAutoConnect;
@@ -6708,10 +6711,13 @@ namespace WiFiAudioConnector
             camMenu.Items.Add(resMenu);
 
             var fpsMenu = new System.Windows.Controls.MenuItem { Header = "⚡ 帧率设置" };
+            var fps24 = new System.Windows.Controls.MenuItem { Header = "24 FPS 电影感", IsChecked = _app.CurrentSettings.CameraFps == 24 };
             var fps30 = new System.Windows.Controls.MenuItem { Header = "30 FPS (默认推荐)", IsChecked = _app.CurrentSettings.CameraFps == 30 };
             var fps60 = new System.Windows.Controls.MenuItem { Header = "60 FPS 极速", IsChecked = _app.CurrentSettings.CameraFps == 60 };
-            fps30.Click += async (s, e) => { _app.CurrentSettings.CameraFps = 30; _app.CurrentSettings.Save(); fps30.IsChecked = true; fps60.IsChecked = false; UpdateCameraSegmentsUI(); if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换帧率: 30 FPS"); };
-            fps60.Click += async (s, e) => { _app.CurrentSettings.CameraFps = 60; _app.CurrentSettings.Save(); fps60.IsChecked = true; fps30.IsChecked = false; UpdateCameraSegmentsUI(); if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换帧率: 60 FPS"); };
+            fps24.Click += async (s, e) => { _app.CurrentSettings.CameraFps = 24; _app.CurrentSettings.Save(); fps24.IsChecked = true; fps30.IsChecked = false; fps60.IsChecked = false; UpdateCameraSegmentsUI(); if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换帧率: 24 FPS"); };
+            fps30.Click += async (s, e) => { _app.CurrentSettings.CameraFps = 30; _app.CurrentSettings.Save(); fps30.IsChecked = true; fps24.IsChecked = false; fps60.IsChecked = false; UpdateCameraSegmentsUI(); if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换帧率: 30 FPS"); };
+            fps60.Click += async (s, e) => { _app.CurrentSettings.CameraFps = 60; _app.CurrentSettings.Save(); fps60.IsChecked = true; fps24.IsChecked = false; fps30.IsChecked = false; UpdateCameraSegmentsUI(); if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换帧率: 60 FPS"); };
+            fpsMenu.Items.Add(fps24);
             fpsMenu.Items.Add(fps30);
             fpsMenu.Items.Add(fps60);
             camMenu.Items.Add(fpsMenu);
@@ -7237,29 +7243,27 @@ namespace WiFiAudioConnector
             };
             camPanel.Children.Add(tbCamTitle);
 
-            // 1. 镜头与分辨率 (水平两列)
-            var lensResGrid = new Grid { Margin = new Thickness(0, 0, 0, 6) };
-            lensResGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-            lensResGrid.ColumnDefinitions.Add(new ColumnDefinition { Width = new GridLength(1, GridUnitType.Star) });
-
-            var lensStack = new StackPanel { Margin = new Thickness(0, 0, 4, 0) };
-            lensStack.Children.Add(new TextBlock
+            // 1. 镜头选择
+            var lensTitle = new TextBlock
             {
-                Text = "选择镜头:",
+                Text = "📷 选择镜头:",
                 FontSize = 11,
                 Foreground = new SolidColorBrush(Color.FromArgb(200, 210, 220, 235)),
                 Margin = new Thickness(0, 0, 0, 3)
-            });
+            };
+            camPanel.Children.Add(lensTitle);
+
             var lensSegBorder = new Border
             {
                 Background = new SolidColorBrush(Color.FromArgb(170, 25, 28, 36)),
                 BorderBrush = new SolidColorBrush(Color.FromArgb(60, 255, 255, 255)),
                 BorderThickness = new Thickness(1),
                 CornerRadius = new CornerRadius(6),
-                Padding = new Thickness(2)
+                Padding = new Thickness(2),
+                Margin = new Thickness(0, 0, 0, 6)
             };
             var lensSegGrid = new System.Windows.Controls.Primitives.UniformGrid { Rows = 1, Columns = 2 };
-            _btnCamFacingBack = CreateCameraSegmentButton("后置主摄");
+            _btnCamFacingBack = CreateCameraSegmentButton("后置主摄 (推荐)");
             _btnCamFacingFront = CreateCameraSegmentButton("前置自拍");
             _btnCamFacingBack.Click += async (s, e) =>
             {
@@ -7273,6 +7277,10 @@ namespace WiFiAudioConnector
             {
                 if (_app.CurrentSettings.CameraFacing == "front") return;
                 _app.CurrentSettings.CameraFacing = "front";
+                if (_app.CurrentSettings.CameraSize == "3840x2160")
+                {
+                    _app.CurrentSettings.CameraSize = "1920x1080";
+                }
                 _app.CurrentSettings.Save();
                 UpdateCameraSegmentsUI();
                 if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换至: 前置自拍");
@@ -7280,29 +7288,45 @@ namespace WiFiAudioConnector
             lensSegGrid.Children.Add(_btnCamFacingBack);
             lensSegGrid.Children.Add(_btnCamFacingFront);
             lensSegBorder.Child = lensSegGrid;
-            lensStack.Children.Add(lensSegBorder);
-            Grid.SetColumn(lensStack, 0);
-            lensResGrid.Children.Add(lensStack);
+            camPanel.Children.Add(lensSegBorder);
 
-            var resStack = new StackPanel { Margin = new Thickness(4, 0, 0, 0) };
-            resStack.Children.Add(new TextBlock
+            // 2. 输出分辨率 (根据硬件能力支持 4K / 1080P / 720P)
+            var resTitle = new TextBlock
             {
-                Text = "输出分辨率:",
+                Text = "🖥️ 输出分辨率:",
                 FontSize = 11,
                 Foreground = new SolidColorBrush(Color.FromArgb(200, 210, 220, 235)),
                 Margin = new Thickness(0, 0, 0, 3)
-            });
+            };
+            camPanel.Children.Add(resTitle);
+
             var resSegBorder = new Border
             {
                 Background = new SolidColorBrush(Color.FromArgb(170, 25, 28, 36)),
                 BorderBrush = new SolidColorBrush(Color.FromArgb(60, 255, 255, 255)),
                 BorderThickness = new Thickness(1),
                 CornerRadius = new CornerRadius(6),
-                Padding = new Thickness(2)
+                Padding = new Thickness(2),
+                Margin = new Thickness(0, 0, 0, 6)
             };
-            var resSegGrid = new System.Windows.Controls.Primitives.UniformGrid { Rows = 1, Columns = 2 };
+            var resSegGrid = new System.Windows.Controls.Primitives.UniformGrid { Rows = 1, Columns = 3 };
+            _btnCamRes4k = CreateCameraSegmentButton("4K 极清");
             _btnCamRes1080 = CreateCameraSegmentButton("1080P 超清");
             _btnCamRes720 = CreateCameraSegmentButton("720P 高清");
+
+            _btnCamRes4k.Click += async (s, e) =>
+            {
+                if (_app.CurrentSettings.CameraFacing == "front")
+                {
+                    _app.ShowNotification("无法使用 4K 分辨率", "前置自拍镜头硬件不支持 4K 16:9，请切换至后置主摄使用 4K", ToolTipIcon.Warning);
+                    return;
+                }
+                if (_app.CurrentSettings.CameraSize == "3840x2160") return;
+                _app.CurrentSettings.CameraSize = "3840x2160";
+                _app.CurrentSettings.Save();
+                UpdateCameraSegmentsUI();
+                if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换分辨率: 4K 极清");
+            };
             _btnCamRes1080.Click += async (s, e) =>
             {
                 if (_app.CurrentSettings.CameraSize == "1920x1080") return;
@@ -7319,22 +7343,73 @@ namespace WiFiAudioConnector
                 UpdateCameraSegmentsUI();
                 if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换分辨率: 720P 高清");
             };
+            resSegGrid.Children.Add(_btnCamRes4k);
             resSegGrid.Children.Add(_btnCamRes1080);
             resSegGrid.Children.Add(_btnCamRes720);
             resSegBorder.Child = resSegGrid;
-            resStack.Children.Add(resSegBorder);
-            Grid.SetColumn(resStack, 1);
-            lensResGrid.Children.Add(resStack);
+            camPanel.Children.Add(resSegBorder);
 
-            camPanel.Children.Add(lensResGrid);
+            // 3. 采集帧率 (24 / 30 / 60 FPS)
+            var fpsTitle = new TextBlock
+            {
+                Text = "⚡ 采集帧率:",
+                FontSize = 11,
+                Foreground = new SolidColorBrush(Color.FromArgb(200, 210, 220, 235)),
+                Margin = new Thickness(0, 0, 0, 3)
+            };
+            camPanel.Children.Add(fpsTitle);
 
-            // 2. 画面旋转角度 (0° / 90° / 180° / 270°)
+            var fpsSegBorder = new Border
+            {
+                Background = new SolidColorBrush(Color.FromArgb(170, 25, 28, 36)),
+                BorderBrush = new SolidColorBrush(Color.FromArgb(60, 255, 255, 255)),
+                BorderThickness = new Thickness(1),
+                CornerRadius = new CornerRadius(6),
+                Padding = new Thickness(2),
+                Margin = new Thickness(0, 0, 0, 6)
+            };
+            var fpsSegGrid = new System.Windows.Controls.Primitives.UniformGrid { Rows = 1, Columns = 3 };
+            _btnCamFps24 = CreateCameraSegmentButton("24 FPS");
+            _btnCamFps30 = CreateCameraSegmentButton("30 FPS");
+            _btnCamFps60 = CreateCameraSegmentButton("60 FPS");
+
+            _btnCamFps24.Click += async (s, e) =>
+            {
+                if (_app.CurrentSettings.CameraFps == 24) return;
+                _app.CurrentSettings.CameraFps = 24;
+                _app.CurrentSettings.Save();
+                UpdateCameraSegmentsUI();
+                if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换帧率: 24 FPS (电影感/低负载)");
+            };
+            _btnCamFps30.Click += async (s, e) =>
+            {
+                if (_app.CurrentSettings.CameraFps == 30) return;
+                _app.CurrentSettings.CameraFps = 30;
+                _app.CurrentSettings.Save();
+                UpdateCameraSegmentsUI();
+                if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换帧率: 30 FPS (标准平稳)");
+            };
+            _btnCamFps60.Click += async (s, e) =>
+            {
+                if (_app.CurrentSettings.CameraFps == 60) return;
+                _app.CurrentSettings.CameraFps = 60;
+                _app.CurrentSettings.Save();
+                UpdateCameraSegmentsUI();
+                if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换帧率: 60 FPS (高刷极速)");
+            };
+            fpsSegGrid.Children.Add(_btnCamFps24);
+            fpsSegGrid.Children.Add(_btnCamFps30);
+            fpsSegGrid.Children.Add(_btnCamFps60);
+            fpsSegBorder.Child = fpsSegGrid;
+            camPanel.Children.Add(fpsSegBorder);
+
+            // 4. 画面旋转角度 (0° / 90° / 180° / 270°)
             var rotTitle = new TextBlock
             {
                 Text = "🔄 画面旋转角度:",
                 FontSize = 11,
                 Foreground = new SolidColorBrush(Color.FromArgb(200, 210, 220, 235)),
-                Margin = new Thickness(0, 3, 0, 3)
+                Margin = new Thickness(0, 0, 0, 3)
             };
             camPanel.Children.Add(rotTitle);
 
@@ -7393,7 +7468,7 @@ namespace WiFiAudioConnector
             rotSegBorder.Child = rotSegGrid;
             camPanel.Children.Add(rotSegBorder);
 
-            // 3. 自拍镜像与高级设置
+            // 5. 自拍镜像与高级设置
             _cbCamMirror = new CheckBox
             {
                 Content = "🪞 水平镜像翻转 (自拍镜面，画面左右对调)",
@@ -7441,30 +7516,6 @@ namespace WiFiAudioConnector
                 if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换: 持续推流模式");
             };
             camPanel.Children.Add(_cbCamOnDemand);
-
-            _cbCam60Fps = new CheckBox
-            {
-                Content = "⚡ 开启 60 FPS 极速高帧率 (需网络带宽良好)",
-                Foreground = System.Windows.Media.Brushes.White,
-                FontSize = 11,
-                Margin = new Thickness(0, 2, 0, 4),
-                IsChecked = (_app.CurrentSettings.CameraFps == 60)
-            };
-            _cbCam60Fps.Checked += async (s, e) =>
-            {
-                _app.CurrentSettings.CameraFps = 60;
-                _app.CurrentSettings.Save();
-                UpdateCameraSegmentsUI();
-                if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已开启: 60 FPS 高帧率");
-            };
-            _cbCam60Fps.Unchecked += async (s, e) =>
-            {
-                _app.CurrentSettings.CameraFps = 30;
-                _app.CurrentSettings.Save();
-                UpdateCameraSegmentsUI();
-                if (_app.IsCameraRunning) await _app.ReloadCameraStreamAsync("已切换: 30 FPS 默认帧率");
-            };
-            camPanel.Children.Add(_cbCam60Fps);
 
             _cbCamVirtual = new CheckBox
             {
@@ -8300,12 +8351,44 @@ namespace WiFiAudioConnector
             Action act = () =>
             {
                 var s = _app.CurrentSettings;
-                SetSegmentActive(_btnCamFacingBack, s.CameraFacing != "front");
-                SetSegmentActive(_btnCamFacingFront, s.CameraFacing == "front");
+                bool isFront = (s.CameraFacing == "front");
 
-                SetSegmentActive(_btnCamRes1080, s.CameraSize != "1280x720");
-                SetSegmentActive(_btnCamRes720, s.CameraSize == "1280x720");
+                // 1. Lens
+                SetSegmentActive(_btnCamFacingBack, !isFront);
+                SetSegmentActive(_btnCamFacingFront, isFront);
 
+                // 2. Resolution (with hardware capability check)
+                bool is4k = (s.CameraSize == "3840x2160");
+                bool is1080 = (s.CameraSize == "1920x1080" || (!is4k && s.CameraSize != "1280x720"));
+                bool is720 = (s.CameraSize == "1280x720");
+
+                if (_btnCamRes4k != null)
+                {
+                    if (isFront)
+                    {
+                        _btnCamRes4k.IsEnabled = false;
+                        _btnCamRes4k.Opacity = 0.35;
+                        _btnCamRes4k.ToolTip = "前置自拍镜头硬件不支持 4K 分辨率 (最高 1080P)";
+                        SetSegmentActive(_btnCamRes4k, false);
+                    }
+                    else
+                    {
+                        _btnCamRes4k.IsEnabled = true;
+                        _btnCamRes4k.Opacity = 1.0;
+                        _btnCamRes4k.ToolTip = "4K 极清分辨率 (3840x2160，后置主摄原生支持)";
+                        SetSegmentActive(_btnCamRes4k, is4k);
+                    }
+                }
+                SetSegmentActive(_btnCamRes1080, is1080);
+                SetSegmentActive(_btnCamRes720, is720);
+
+                // 3. FPS (24 / 30 / 60)
+                int curFps = s.CameraFps > 0 ? s.CameraFps : 30;
+                SetSegmentActive(_btnCamFps24, curFps == 24);
+                SetSegmentActive(_btnCamFps30, curFps == 30);
+                SetSegmentActive(_btnCamFps60, curFps == 60);
+
+                // 4. Orientation
                 SetSegmentActive(_btnCamRot0, s.CameraOrientation == 0);
                 SetSegmentActive(_btnCamRot90, s.CameraOrientation == 90);
                 SetSegmentActive(_btnCamRot180, s.CameraOrientation == 180);
@@ -8313,7 +8396,6 @@ namespace WiFiAudioConnector
 
                 if (_cbCamMirror != null) _cbCamMirror.IsChecked = s.CameraMirror;
                 if (_cbCamOnDemand != null) _cbCamOnDemand.IsChecked = s.CameraOnDemand;
-                if (_cbCam60Fps != null) _cbCam60Fps.IsChecked = (s.CameraFps == 60);
                 if (_cbCamVirtual != null) _cbCamVirtual.IsChecked = s.CameraVirtualDeviceMode;
                 if (_cbCamPreview != null) _cbCamPreview.IsChecked = s.CameraShowPreviewWindow;
             };
