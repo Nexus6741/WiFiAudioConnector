@@ -84,11 +84,34 @@ namespace WiFiAudioConnector
     {
         public string Name { get; set; }
         public string Target { get; set; } // e.g. "192.168.31.238:5555" or USB serial "abc1234" or Bluetooth ID
+        public string HardwareId { get; set; } // Hardware Serial Number ("a22280af") or BT MAC ("487E25B0D930")
         public string Ip { get; set; }
         public int Port { get; set; }
         public bool IsUsb { get; set; }
         public bool IsBluetooth { get; set; }
         public bool IsCustom { get; set; }
+
+        public static string ExtractBluetoothMac(string target)
+        {
+            if (string.IsNullOrEmpty(target)) return "";
+            var m = Regex.Match(target, @"&([0-9A-Fa-f]{12})_");
+            if (m.Success) return m.Groups[1].Value.ToUpperInvariant();
+            var m2 = Regex.Match(target, @"([0-9A-Fa-f]{2}[:-]){5}([0-9A-Fa-f]{2})");
+            if (m2.Success) return m2.Value.Replace(":", "").Replace("-", "").ToUpperInvariant();
+            var m3 = Regex.Match(target, @"[0-9A-Fa-f]{12}");
+            if (m3.Success) return m3.Value.ToUpperInvariant();
+            return target;
+        }
+
+        public string BindingKey
+        {
+            get
+            {
+                string mode = IsBluetooth ? "bt" : (IsUsb ? "usb" : "wifi");
+                string id = !string.IsNullOrEmpty(HardwareId) ? HardwareId : (!string.IsNullOrEmpty(Target) ? Target : Name);
+                return string.Format("{0}:{1}", mode, id);
+            }
+        }
 
         public string ModeIcon
         {
@@ -176,13 +199,23 @@ namespace WiFiAudioConnector
 
     public class DeviceHotkeyBinding
     {
-        public string Target { get; set; }        // "192.168.31.239:5555" or "a22280af" or Bluetooth ID
+        public string BindingKey { get; set; }    // e.g. "wifi:a22280af", "usb:a22280af", "bt:487E25B0D930"
+        public string HardwareId { get; set; }    // "a22280af" (ro.serialno) or BT MAC
+        public string Target { get; set; }        // Current active/last-known target: "192.168.31.240:5555" or "a22280af" or Bluetooth ID
         public string DeviceName { get; set; }    // "Xiaomi 15 Pro"
         public bool IsUsb { get; set; }           // true = USB 有线, false = Wi-Fi 无线
         public bool IsBluetooth { get; set; }     // true = 蓝牙 A2DP
         public ModifierKeys Modifiers { get; set; }
         public Key Key { get; set; }
         public bool Enabled { get; set; }
+
+        public string GetEffectiveBindingKey()
+        {
+            if (!string.IsNullOrEmpty(BindingKey)) return BindingKey;
+            string mode = IsBluetooth ? "bt" : (IsUsb ? "usb" : "wifi");
+            string id = !string.IsNullOrEmpty(HardwareId) ? HardwareId : (!string.IsNullOrEmpty(Target) ? Target : DeviceName);
+            return string.Format("{0}:{1}", mode, id);
+        }
 
         public string DisplayName
         {
@@ -235,7 +268,19 @@ namespace WiFiAudioConnector
             {
                 string modeTag = IsBluetooth ? "蓝牙 A2DP" : (IsUsb ? "USB 有线" : "Wi-Fi 无线");
                 string hkTag = Enabled && Key != Key.None ? HotkeyManager.FormatHotkey(Modifiers, Key) : "未设置";
-                string displayTarget = IsBluetooth ? "蓝牙原生配对" : Target;
+                string displayTarget;
+                if (IsBluetooth)
+                {
+                    displayTarget = "蓝牙原生配对";
+                }
+                else if (IsUsb)
+                {
+                    displayTarget = "USB: " + Target;
+                }
+                else
+                {
+                    displayTarget = "IP: " + (string.IsNullOrEmpty(Target) ? "动态自动追踪" : Target);
+                }
                 return string.Format("{0} [{1}]  ({2})   ▶   快捷键: {3}", DeviceName, modeTag, displayTarget, hkTag);
             }
         }
@@ -1760,6 +1805,77 @@ namespace WiFiAudioConnector
 
         public Dictionary<string, DeviceHotkeyBinding> DeviceHotkeys = new Dictionary<string, DeviceHotkeyBinding>(StringComparer.OrdinalIgnoreCase);
 
+        public DeviceHotkeyBinding FindBinding(string bindingKeyOrTarget)
+        {
+            if (string.IsNullOrEmpty(bindingKeyOrTarget)) return null;
+            DeviceHotkeyBinding b;
+            if (DeviceHotkeys.TryGetValue(bindingKeyOrTarget, out b)) return b;
+
+            foreach (var item in DeviceHotkeys.Values)
+            {
+                if (string.Equals(item.BindingKey, bindingKeyOrTarget, StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(item.GetEffectiveBindingKey(), bindingKeyOrTarget, StringComparison.OrdinalIgnoreCase))
+                {
+                    return item;
+                }
+            }
+
+            foreach (var item in DeviceHotkeys.Values)
+            {
+                if (string.Equals(item.Target, bindingKeyOrTarget, StringComparison.OrdinalIgnoreCase))
+                {
+                    return item;
+                }
+            }
+
+            if (bindingKeyOrTarget.Contains(":"))
+            {
+                string ip = bindingKeyOrTarget.Split(':')[0];
+                foreach (var item in DeviceHotkeys.Values)
+                {
+                    if (!item.IsUsb && !item.IsBluetooth && !string.IsNullOrEmpty(item.Target) && item.Target.StartsWith(ip + ":", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return item;
+                    }
+                }
+            }
+
+            return null;
+        }
+
+        public DeviceHotkeyBinding FindBindingByHardware(string hardwareId, bool isUsb, bool isBluetooth, string fallbackName = null)
+        {
+            if (!string.IsNullOrEmpty(hardwareId))
+            {
+                foreach (var item in DeviceHotkeys.Values)
+                {
+                    if (item.IsUsb == isUsb && item.IsBluetooth == isBluetooth)
+                    {
+                        if (string.Equals(item.HardwareId, hardwareId, StringComparison.OrdinalIgnoreCase))
+                        {
+                            return item;
+                        }
+                    }
+                }
+            }
+
+            if (!string.IsNullOrEmpty(fallbackName))
+            {
+                foreach (var item in DeviceHotkeys.Values)
+                {
+                    if (item.IsUsb == isUsb && item.IsBluetooth == isBluetooth)
+                    {
+                        if (string.Equals(item.DeviceName, fallbackName, StringComparison.OrdinalIgnoreCase))
+                        {
+                            return item;
+                        }
+                    }
+                }
+            }
+
+            return null;
+        }
+
         public static string GetConfigPath()
         {
             string dir = AppDomain.CurrentDomain.BaseDirectory;
@@ -1803,14 +1919,17 @@ namespace WiFiAudioConnector
                 foreach (var kvp in DeviceHotkeys)
                 {
                     var b = kvp.Value;
-                    sb.AppendLine(string.Format("DeviceHotkey={0}|{1}|{2}|{3}|{4}|{5}|{6}",
-                        b.Target,
+                    string bKey = b.GetEffectiveBindingKey();
+                    sb.AppendLine(string.Format("DeviceHotkey={0}|{1}|{2}|{3}|{4}|{5}|{6}|{7}|{8}",
+                        bKey,
                         (b.DeviceName ?? "").Replace("|", "_"),
                         b.IsUsb ? "1" : "0",
                         (int)b.Modifiers,
                         (int)b.Key,
                         b.Enabled ? "1" : "0",
-                        b.IsBluetooth ? "1" : "0"));
+                        b.IsBluetooth ? "1" : "0",
+                        (b.HardwareId ?? "").Replace("|", "_"),
+                        (b.Target ?? "").Replace("|", "_")));
                 }
 
                 File.WriteAllText(GetConfigPath(), sb.ToString(), Encoding.UTF8);
@@ -1871,7 +1990,22 @@ namespace WiFiAudioConnector
                             else if (k == "DeviceHotkey")
                             {
                                 var segs = v.Split('|');
-                                if (segs.Length >= 6)
+                                if (segs.Length >= 9)
+                                {
+                                    var b = new DeviceHotkeyBinding();
+                                    b.BindingKey = segs[0].Trim();
+                                    b.DeviceName = segs[1].Trim();
+                                    b.IsUsb = (segs[2].Trim() == "1");
+                                    int m; if (int.TryParse(segs[3].Trim(), out m)) b.Modifiers = (ModifierKeys)m;
+                                    int kCode; if (int.TryParse(segs[4].Trim(), out kCode)) b.Key = (Key)kCode;
+                                    b.Enabled = (segs[5].Trim() == "1");
+                                    b.IsBluetooth = (segs[6].Trim() == "1");
+                                    b.HardwareId = segs[7].Trim();
+                                    b.Target = segs[8].Trim();
+                                    string key = b.GetEffectiveBindingKey();
+                                    s.DeviceHotkeys[key] = b;
+                                }
+                                else if (segs.Length >= 6)
                                 {
                                     var b = new DeviceHotkeyBinding();
                                     b.Target = segs[0].Trim();
@@ -1881,7 +2015,42 @@ namespace WiFiAudioConnector
                                     int kCode; if (int.TryParse(segs[4].Trim(), out kCode)) b.Key = (Key)kCode;
                                     b.Enabled = (segs[5].Trim() == "1");
                                     if (segs.Length >= 7) b.IsBluetooth = (segs[6].Trim() == "1");
-                                    s.DeviceHotkeys[b.Target] = b;
+
+                                    if (b.IsBluetooth)
+                                    {
+                                        var match = Regex.Match(b.Target, @"&([0-9A-Fa-f]{12})_");
+                                        b.HardwareId = match.Success ? match.Groups[1].Value : b.Target;
+                                        b.BindingKey = "bt:" + b.HardwareId;
+                                    }
+                                    else if (b.IsUsb)
+                                    {
+                                        b.HardwareId = b.Target;
+                                        b.BindingKey = "usb:" + b.HardwareId;
+                                    }
+                                    else
+                                    {
+                                        b.BindingKey = "wifi:" + (!string.IsNullOrEmpty(b.HardwareId) ? b.HardwareId : b.DeviceName);
+                                    }
+
+                                    // Deduplicate legacy entries (e.g. if multiple IPs for same device exist)
+                                    string effKey = b.GetEffectiveBindingKey();
+                                    if (s.DeviceHotkeys.ContainsKey(effKey))
+                                    {
+                                        var existing = s.DeviceHotkeys[effKey];
+                                        // Keep custom user hotkey over default Ctrl+Alt
+                                        if (existing.Modifiers == (ModifierKeys.Control | ModifierKeys.Alt) && b.Modifiers != (ModifierKeys.Control | ModifierKeys.Alt))
+                                        {
+                                            s.DeviceHotkeys[effKey] = b;
+                                        }
+                                        else
+                                        {
+                                            if (!string.IsNullOrEmpty(b.Target)) existing.Target = b.Target;
+                                        }
+                                    }
+                                    else
+                                    {
+                                        s.DeviceHotkeys[effKey] = b;
+                                    }
                                 }
                             }
                         }
@@ -2141,6 +2310,8 @@ namespace WiFiAudioConnector
                 if (string.Equals(b.Target, "Bluetooth A2DP:5555", StringComparison.OrdinalIgnoreCase)) continue;
                 _bindingsList.Add(new DeviceHotkeyBinding
                 {
+                    BindingKey = b.GetEffectiveBindingKey(),
+                    HardwareId = b.HardwareId,
                     Target = b.Target,
                     DeviceName = b.DeviceName,
                     IsUsb = b.IsUsb,
@@ -2157,19 +2328,41 @@ namespace WiFiAudioConnector
                 foreach (var d in _app.LastDiscoveredDevices)
                 {
                     if (string.IsNullOrEmpty(d.Target) || d.IsCustom) continue;
-                    bool exists = false;
+                    DeviceHotkeyBinding existing = null;
                     foreach (var b in _bindingsList)
                     {
-                        if (string.Equals(b.Target, d.Target, StringComparison.OrdinalIgnoreCase))
+                        if (b.IsUsb == d.IsUsb && b.IsBluetooth == d.IsBluetooth)
                         {
-                            exists = true;
-                            break;
+                            if (!string.IsNullOrEmpty(d.HardwareId) && string.Equals(b.HardwareId, d.HardwareId, StringComparison.OrdinalIgnoreCase))
+                            {
+                                existing = b;
+                                break;
+                            }
+                            if (string.Equals(b.DeviceName, d.Name, StringComparison.OrdinalIgnoreCase))
+                            {
+                                existing = b;
+                                break;
+                            }
+                            if (string.Equals(b.Target, d.Target, StringComparison.OrdinalIgnoreCase))
+                            {
+                                existing = b;
+                                break;
+                            }
                         }
                     }
-                    if (!exists)
+
+                    if (existing != null)
+                    {
+                        existing.Target = d.Target;
+                        if (!string.IsNullOrEmpty(d.HardwareId)) existing.HardwareId = d.HardwareId;
+                        existing.DeviceName = d.Name;
+                    }
+                    else
                     {
                         _bindingsList.Add(new DeviceHotkeyBinding
                         {
+                            BindingKey = d.BindingKey,
+                            HardwareId = d.HardwareId,
                             Target = d.Target,
                             DeviceName = d.Name,
                             IsUsb = d.IsUsb,
@@ -2198,7 +2391,7 @@ namespace WiFiAudioConnector
                 if (!found)
                 {
                     bool isBt = curTarget.StartsWith(@"\\?\BTHENUM", StringComparison.OrdinalIgnoreCase) || curTarget.StartsWith("Bluetooth#", StringComparison.OrdinalIgnoreCase);
-                    _bindingsList.Add(new DeviceHotkeyBinding
+                    var newB = new DeviceHotkeyBinding
                     {
                         Target = curTarget,
                         DeviceName = _app.CurrentSettings.DeviceName,
@@ -2207,7 +2400,9 @@ namespace WiFiAudioConnector
                         Modifiers = ModifierKeys.Control | ModifierKeys.Alt,
                         Key = isBt ? Key.D3 : (curTarget.Contains(":") ? Key.D1 : Key.D2),
                         Enabled = true
-                    });
+                    };
+                    newB.BindingKey = newB.GetEffectiveBindingKey();
+                    _bindingsList.Add(newB);
                 }
             }
         }
@@ -2602,26 +2797,50 @@ namespace WiFiAudioConnector
             _tbStatus.Foreground = new SolidColorBrush(Color.FromArgb(255, 245, 180, 50));
 
             var scanned = await _app.ScanDevicesAsync();
+            int updatedCount = 0;
             int addedCount = 0;
             foreach (var d in scanned)
             {
-                if (string.IsNullOrEmpty(d.Target)) continue;
-                bool exists = false;
+                if (string.IsNullOrEmpty(d.Target) || d.IsCustom) continue;
+                DeviceHotkeyBinding existing = null;
                 foreach (var b in _bindingsList)
                 {
-                    if (string.Equals(b.Target, d.Target, StringComparison.OrdinalIgnoreCase))
+                    if (b.IsUsb == d.IsUsb && b.IsBluetooth == d.IsBluetooth)
                     {
-                        exists = true;
-                        b.DeviceName = d.Name;
-                        b.IsUsb = d.IsUsb;
-                        b.IsBluetooth = d.IsBluetooth;
-                        break;
+                        if (!string.IsNullOrEmpty(d.HardwareId) && string.Equals(b.HardwareId, d.HardwareId, StringComparison.OrdinalIgnoreCase))
+                        {
+                            existing = b;
+                            break;
+                        }
+                        if (string.Equals(b.DeviceName, d.Name, StringComparison.OrdinalIgnoreCase))
+                        {
+                            existing = b;
+                            break;
+                        }
+                        if (string.Equals(b.Target, d.Target, StringComparison.OrdinalIgnoreCase))
+                        {
+                            existing = b;
+                            break;
+                        }
                     }
                 }
-                if (!exists)
+
+                if (existing != null)
+                {
+                    if (!string.Equals(existing.Target, d.Target, StringComparison.OrdinalIgnoreCase))
+                    {
+                        existing.Target = d.Target;
+                        updatedCount++;
+                    }
+                    if (!string.IsNullOrEmpty(d.HardwareId)) existing.HardwareId = d.HardwareId;
+                    existing.DeviceName = d.Name;
+                }
+                else
                 {
                     var newBinding = new DeviceHotkeyBinding
                     {
+                        BindingKey = d.BindingKey,
+                        HardwareId = d.HardwareId,
                         Target = d.Target,
                         DeviceName = d.Name,
                         IsUsb = d.IsUsb,
@@ -2653,7 +2872,14 @@ namespace WiFiAudioConnector
                 _lbDevices.SelectedIndex = sel;
             }
 
-            _tbStatus.Text = addedCount > 0 ? string.Format("✓ 扫描完成，新增了 {0} 个连接方式（含蓝牙/USB/无线）！", addedCount) : "✓ 扫描完成，所有设备与连接模式（含蓝牙）均在列表中。";
+            if (addedCount > 0 || updatedCount > 0)
+            {
+                _tbStatus.Text = string.Format("✓ 扫描完成！新增 {0} 项，自动更新了 {1} 项设备的最新 IP！", addedCount, updatedCount);
+            }
+            else
+            {
+                _tbStatus.Text = "✓ 扫描完成，所有设备与模式均已在列表中且 IP 处于最新状态。";
+            }
             _tbStatus.Foreground = new SolidColorBrush(Color.FromArgb(255, 80, 200, 120));
         }
 
@@ -2668,7 +2894,19 @@ namespace WiFiAudioConnector
             }
 
             string modeTag = _selectedBinding.IsBluetooth ? "蓝牙 A2DP 直通" : (_selectedBinding.IsUsb ? "USB 有线直连" : "Wi-Fi 无线网络");
-            string targetLabel = _selectedBinding.IsBluetooth ? "蓝牙原生配对" : _selectedBinding.Target;
+            string targetLabel;
+            if (_selectedBinding.IsBluetooth)
+            {
+                targetLabel = "蓝牙原生配对";
+            }
+            else if (_selectedBinding.IsUsb)
+            {
+                targetLabel = "硬件序列号: " + _selectedBinding.Target;
+            }
+            else
+            {
+                targetLabel = "当前 IP: " + (string.IsNullOrEmpty(_selectedBinding.Target) ? "动态自动追踪" : _selectedBinding.Target);
+            }
             _tbSelectedTitle.Text = string.Format("正在设置: {0} [{1}] ({2})", _selectedBinding.DeviceName, modeTag, targetLabel);
             _tempMod = _selectedBinding.Modifiers;
             _tempKey = _selectedBinding.Key;
@@ -2741,7 +2979,8 @@ namespace WiFiAudioConnector
             foreach (var b in _bindingsList)
             {
                 if (string.Equals(b.Target, "Bluetooth A2DP:5555", StringComparison.OrdinalIgnoreCase)) continue;
-                _app.CurrentSettings.DeviceHotkeys[b.Target] = b;
+                string bKey = b.GetEffectiveBindingKey();
+                _app.CurrentSettings.DeviceHotkeys[bKey] = b;
             }
             _app.CurrentSettings.Save();
 
@@ -3909,12 +4148,7 @@ namespace WiFiAudioConnector
                     return;
                 }
 
-                LogLine("Creating App instance");
-                var app = new App();
-                app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
-                LogLine("Calling app.Run()");
-                app.Run();
-                LogLine("app.Run() returned");
+                RunApp();
             }
             catch (Exception ex)
             {
@@ -3925,6 +4159,26 @@ namespace WiFiAudioConnector
             {
                 LogLine("Main finally entered");
                 CleanAllChildProcesses();
+            }
+        }
+
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.NoInlining)]
+        private static void RunApp()
+        {
+            try
+            {
+                LogLine("Creating App instance");
+                var app = new App();
+                app.ShutdownMode = ShutdownMode.OnExplicitShutdown;
+                LogLine("Calling app.Run()");
+                app.Run();
+                LogLine("app.Run() returned");
+            }
+            catch (Exception ex)
+            {
+                LogLine("RunApp Exception: " + ex);
+                File.WriteAllText(Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "crash.log"), ex.ToString());
+                throw;
             }
         }
 
@@ -4337,13 +4591,21 @@ namespace WiFiAudioConnector
                                     if (sp.Length > 1) int.TryParse(sp[1], out port);
                                 }
 
-                                // Query friendly model name
-                                string friendlyName = QueryDeviceName(adbPath, serial);
+                                // Query friendly model name and hardware ID
+                                string friendlyName;
+                                string hwId;
+                                QueryDeviceInfo(adbPath, serial, out friendlyName, out hwId);
+
                                 if (string.IsNullOrEmpty(friendlyName))
                                 {
                                     // Parse model:xxx from line
                                     var match = Regex.Match(line, @"model:(\S+)");
                                     friendlyName = match.Success ? match.Groups[1].Value : serial;
+                                }
+
+                                if (string.IsNullOrEmpty(hwId) && !isTcp)
+                                {
+                                    hwId = serial;
                                 }
 
                                 adbList.Add(new DeviceItem
@@ -4353,7 +4615,9 @@ namespace WiFiAudioConnector
                                     Ip = ip,
                                     Port = port,
                                     IsUsb = !isTcp,
-                                    IsCustom = false
+                                    IsBluetooth = false,
+                                    IsCustom = false,
+                                    HardwareId = hwId
                                 });
                             }
                         }
@@ -4383,6 +4647,7 @@ namespace WiFiAudioConnector
                     var btDevices = await btTask;
                     foreach (var bt in btDevices)
                     {
+                        string hwId = DeviceItem.ExtractBluetoothMac(bt.Id);
                         list.Add(new DeviceItem
                         {
                             Name = bt.Name,
@@ -4391,7 +4656,8 @@ namespace WiFiAudioConnector
                             Port = 0,
                             IsUsb = false,
                             IsBluetooth = true,
-                            IsCustom = false
+                            IsCustom = false,
+                            HardwareId = hwId
                         });
                     }
                 }
@@ -4407,7 +4673,16 @@ namespace WiFiAudioConnector
             bool currentTargetFound = list.Any(d => string.Equals(d.Target, _settings.Target, StringComparison.OrdinalIgnoreCase));
             if (!currentTargetFound && !string.IsNullOrEmpty(_settings.Target) && _settings.Target.Contains(":") && wifiDevices.Count > 0)
             {
-                var matched = wifiDevices.FirstOrDefault(d => string.Equals(d.Name, _settings.DeviceName, StringComparison.OrdinalIgnoreCase));
+                DeviceItem matched = null;
+                var oldBinding = _settings.FindBinding(_settings.Target);
+                if (oldBinding != null && !string.IsNullOrEmpty(oldBinding.HardwareId))
+                {
+                    matched = wifiDevices.FirstOrDefault(d => string.Equals(d.HardwareId, oldBinding.HardwareId, StringComparison.OrdinalIgnoreCase));
+                }
+                if (matched == null)
+                {
+                    matched = wifiDevices.FirstOrDefault(d => string.Equals(d.Name, _settings.DeviceName, StringComparison.OrdinalIgnoreCase));
+                }
                 if (matched == null && wifiDevices.Count == 1)
                 {
                     matched = wifiDevices[0];
@@ -4415,7 +4690,7 @@ namespace WiFiAudioConnector
 
                 if (matched != null)
                 {
-                    LogLine(string.Format("检测到局域网设备 IP 变动: {0} -> {1}", _settings.Target, matched.Target));
+                    LogLine(string.Format("检测到局域网设备 IP 变动: {0} -> {1} (硬件ID: {2})", _settings.Target, matched.Target, matched.HardwareId));
                     _settings.Target = matched.Target;
                     _settings.DeviceIp = matched.Ip;
                     _settings.Port = matched.Port;
@@ -4434,15 +4709,58 @@ namespace WiFiAudioConnector
                 _settings.Save();
             }
 
-            // Ensure newly discovered devices exist in settings hotkeys dictionary
+            // Sync discovered devices with hotkeys dictionary based on hardware identity
             bool modified = false;
             foreach (var d in list)
             {
                 if (string.IsNullOrEmpty(d.Target)) continue;
-                if (!_settings.DeviceHotkeys.ContainsKey(d.Target))
+                string bKey = d.BindingKey;
+
+                var existing = _settings.FindBindingByHardware(d.HardwareId, d.IsUsb, d.IsBluetooth, d.Name);
+                if (existing == null) existing = _settings.FindBinding(bKey);
+                if (existing == null) existing = _settings.FindBinding(d.Target);
+
+                if (existing != null)
                 {
-                    _settings.DeviceHotkeys[d.Target] = new DeviceHotkeyBinding
+                    bool changed = false;
+                    if (!string.IsNullOrEmpty(d.HardwareId) && existing.HardwareId != d.HardwareId)
                     {
+                        existing.HardwareId = d.HardwareId;
+                        changed = true;
+                    }
+                    if (existing.Target != d.Target)
+                    {
+                        LogLine(string.Format("更新热键绑定设备地址 [{0}]: {1} -> {2}", existing.DisplayName, existing.Target, d.Target));
+                        existing.Target = d.Target;
+                        changed = true;
+                    }
+                    if (!string.IsNullOrEmpty(d.Name) && existing.DeviceName != d.Name)
+                    {
+                        existing.DeviceName = d.Name;
+                        changed = true;
+                    }
+                    if (string.IsNullOrEmpty(existing.BindingKey) || existing.BindingKey != bKey)
+                    {
+                        existing.BindingKey = bKey;
+                        changed = true;
+                    }
+
+                    string effKey = existing.GetEffectiveBindingKey();
+                    if (!_settings.DeviceHotkeys.ContainsKey(effKey) || _settings.DeviceHotkeys[effKey] != existing)
+                    {
+                        var keysToRemove = _settings.DeviceHotkeys.Where(kvp => kvp.Value == existing && kvp.Key != effKey).Select(kvp => kvp.Key).ToList();
+                        foreach (var k in keysToRemove) _settings.DeviceHotkeys.Remove(k);
+                        _settings.DeviceHotkeys[effKey] = existing;
+                        changed = true;
+                    }
+                    if (changed) modified = true;
+                }
+                else
+                {
+                    var nb = new DeviceHotkeyBinding
+                    {
+                        BindingKey = bKey,
+                        HardwareId = d.HardwareId,
                         Target = d.Target,
                         DeviceName = d.Name,
                         IsUsb = d.IsUsb,
@@ -4451,6 +4769,7 @@ namespace WiFiAudioConnector
                         Key = d.IsBluetooth ? Key.D3 : (d.IsUsb ? Key.D2 : Key.D1),
                         Enabled = true
                     };
+                    _settings.DeviceHotkeys[nb.GetEffectiveBindingKey()] = nb;
                     modified = true;
                 }
             }
@@ -4463,14 +4782,16 @@ namespace WiFiAudioConnector
             return list;
         }
 
-        private string QueryDeviceName(string adbPath, string serial)
+        public static void QueryDeviceInfo(string adbPath, string serial, out string friendlyName, out string hardwareId)
         {
+            friendlyName = "";
+            hardwareId = "";
             try
             {
                 var psi = new ProcessStartInfo
                 {
                     FileName = adbPath,
-                    Arguments = string.Format("-s {0} shell getprop ro.product.marketname", serial),
+                    Arguments = string.Format("-s {0} shell \"getprop ro.serialno; echo ===; getprop ro.boot.serialno; echo ===; getprop ro.product.marketname; echo ===; getprop ro.product.model\"", serial),
                     CreateNoWindow = true,
                     UseShellExecute = false,
                     RedirectStandardOutput = true,
@@ -4478,22 +4799,49 @@ namespace WiFiAudioConnector
                 };
                 using (var p = Process.Start(psi))
                 {
-                    string res = p.StandardOutput.ReadToEnd().Trim();
-                    p.WaitForExit(1500);
-                    if (!string.IsNullOrEmpty(res)) return res;
-                }
+                    string output = p.StandardOutput.ReadToEnd();
+                    p.WaitForExit(2000);
+                    if (!string.IsNullOrEmpty(output))
+                    {
+                        var parts = output.Split(new string[] { "===", "\r\n===\r\n", "\n===\n" }, StringSplitOptions.None);
+                        string roSerial = parts.Length > 0 ? parts[0].Trim() : "";
+                        string bootSerial = parts.Length > 1 ? parts[1].Trim() : "";
+                        string marketName = parts.Length > 2 ? parts[2].Trim() : "";
+                        string model = parts.Length > 3 ? parts[3].Trim() : "";
 
-                // Fallback to ro.product.model
-                psi.Arguments = string.Format("-s {0} shell getprop ro.product.model", serial);
-                using (var p = Process.Start(psi))
-                {
-                    string res = p.StandardOutput.ReadToEnd().Trim();
-                    p.WaitForExit(1500);
-                    if (!string.IsNullOrEmpty(res)) return res;
+                        if (!string.IsNullOrEmpty(roSerial) && !roSerial.Equals("unknown", StringComparison.OrdinalIgnoreCase))
+                        {
+                            hardwareId = roSerial;
+                        }
+                        else if (!string.IsNullOrEmpty(bootSerial) && !bootSerial.Equals("unknown", StringComparison.OrdinalIgnoreCase))
+                        {
+                            hardwareId = bootSerial;
+                        }
+
+                        if (!string.IsNullOrEmpty(marketName))
+                        {
+                            friendlyName = marketName;
+                        }
+                        else if (!string.IsNullOrEmpty(model))
+                        {
+                            friendlyName = model;
+                        }
+                    }
                 }
             }
             catch { }
-            return "";
+
+            if (string.IsNullOrEmpty(hardwareId) && !serial.Contains(":"))
+            {
+                hardwareId = serial;
+            }
+        }
+
+        private string QueryDeviceName(string adbPath, string serial)
+        {
+            string name, hwId;
+            QueryDeviceInfo(adbPath, serial, out name, out hwId);
+            return name;
         }
 
         public async Task<string> SwitchUsbToTcpipAsync(string usbSerial)
@@ -4811,6 +5159,39 @@ namespace WiFiAudioConnector
                 _currentScrcpyTarget = null;
                 _currentScrcpyDeviceName = null;
                 UpdateOverallState();
+
+                // Dynamic IP Auto-Healing:
+                if (isTcp)
+                {
+                    var binding = _settings.FindBinding(target);
+                    string hwId = binding != null ? binding.HardwareId : null;
+                    LogLine(string.Format("连接 {0} 失败，检查是否有局域网 IP 变动 (硬件ID: {1})...", target, hwId ?? "未知"));
+                    var discovered = await ScanDevicesAsync();
+                    DeviceItem matched = null;
+                    if (!string.IsNullOrEmpty(hwId))
+                    {
+                        matched = discovered.FirstOrDefault(d => !d.IsBluetooth && !d.IsUsb && string.Equals(d.HardwareId, hwId, StringComparison.OrdinalIgnoreCase));
+                    }
+                    if (matched == null && !string.IsNullOrEmpty(devName))
+                    {
+                        matched = discovered.FirstOrDefault(d => !d.IsBluetooth && !d.IsUsb && string.Equals(d.Name, devName, StringComparison.OrdinalIgnoreCase));
+                    }
+                    if (matched != null && !string.IsNullOrEmpty(matched.Target) && !string.Equals(matched.Target, target, StringComparison.OrdinalIgnoreCase))
+                    {
+                        LogLine(string.Format("自动定位到新 IP 地址: {0} -> {1}，立即重定向连接！", target, matched.Target));
+                        _settings.Target = matched.Target;
+                        _settings.DeviceIp = matched.Ip;
+                        _settings.Port = matched.Port;
+                        _settings.DeviceName = matched.Name;
+                        if (binding != null) binding.Target = matched.Target;
+                        _settings.Save();
+                        if (_flyout != null) _flyout.SyncCurrentDeviceToUI();
+
+                        ShowNotification("已重新定位设备", string.Format("设备 IP 变更为 {0}，正在重新连接...", matched.Target), ToolTipIcon.Info);
+                        return await ConnectAsync(matched.Target, devName);
+                    }
+                }
+
                 ShowNotification("连接失败", "无法连接到设备，请确认手机已开机且处于连接状态", ToolTipIcon.Error);
                 return false;
             }
@@ -5048,65 +5429,90 @@ namespace WiFiAudioConnector
 
             foreach (var b in _settings.DeviceHotkeys.Values)
             {
-                if (b.Enabled && b.Key != Key.None && !string.IsNullOrEmpty(b.Target))
+                if (b.Enabled && b.Key != Key.None)
                 {
-                    bool ok = _hotkeyManager.Register(b.Target, b.Modifiers, b.Key);
-                    LogLine(string.Format("Registered hotkey for {0} ({1}): {2} -> {3}",
-                        b.DisplayName, b.Target, HotkeyManager.FormatHotkey(b.Modifiers, b.Key), ok));
+                    string regKey = b.GetEffectiveBindingKey();
+                    bool ok = _hotkeyManager.Register(regKey, b.Modifiers, b.Key);
+                    LogLine(string.Format("Registered hotkey for {0} [{1}] (Key: {2}): {3} -> {4}",
+                        b.DisplayName, b.Target, regKey, HotkeyManager.FormatHotkey(b.Modifiers, b.Key), ok));
                 }
             }
         }
 
-        private void OnDeviceHotkeyPressed(string target)
+        private async void OnDeviceHotkeyPressed(string registeredKey)
         {
-            if (string.IsNullOrEmpty(target)) return;
+            if (string.IsNullOrEmpty(registeredKey)) return;
 
-            DeviceHotkeyBinding binding = null;
-            _settings.DeviceHotkeys.TryGetValue(target, out binding);
+            var binding = _settings.FindBinding(registeredKey);
+            string target = (binding != null && !string.IsNullOrEmpty(binding.Target)) ? binding.Target : registeredKey;
             string devName = (binding != null) ? binding.DisplayName : target;
-            bool isBt = target.StartsWith(@"\\?\BTHENUM", StringComparison.OrdinalIgnoreCase) || target.StartsWith("Bluetooth#", StringComparison.OrdinalIgnoreCase);
+            bool isBt = (binding != null && binding.IsBluetooth) || target.StartsWith(@"\\?\BTHENUM", StringComparison.OrdinalIgnoreCase) || target.StartsWith("Bluetooth#", StringComparison.OrdinalIgnoreCase);
 
             // If currently connected to THIS exact target -> Toggle Disconnect!
             if (IsTargetConnected(target))
             {
                 Disconnect(target);
                 ShowNotification("快捷键已触发", string.Format("已断开: {0}", devName), ToolTipIcon.Info);
+                return;
             }
-            else
+
+            // If connecting Bluetooth and another Bluetooth is connected -> disconnect that Bluetooth
+            if (isBt && IsBluetoothConnected)
             {
-                // If connecting Bluetooth and another Bluetooth is connected -> disconnect that Bluetooth
-                if (isBt && IsBluetoothConnected)
-                {
-                    DisconnectBluetooth(false);
-                    Thread.Sleep(200);
-                }
-                // If connecting Scrcpy and another Scrcpy is connected -> disconnect that Scrcpy
-                else if (!isBt && IsScrcpyConnected)
-                {
-                    DisconnectScrcpy(false);
-                    Thread.Sleep(200);
-                }
+                DisconnectBluetooth(false);
+                Thread.Sleep(200);
+            }
+            // If connecting Scrcpy and another Scrcpy is connected -> disconnect that Scrcpy
+            else if (!isBt && IsScrcpyConnected)
+            {
+                DisconnectScrcpy(false);
+                Thread.Sleep(200);
+            }
 
-                _settings.Target = target;
-                if (binding != null)
+            _settings.Target = target;
+            if (binding != null)
+            {
+                _settings.DeviceName = binding.DeviceName;
+                if (!binding.IsUsb && !binding.IsBluetooth && target.Contains(":"))
                 {
-                    _settings.DeviceName = binding.DeviceName;
-                    if (!binding.IsUsb && !binding.IsBluetooth && target.Contains(":"))
-                    {
-                        var sp = target.Split(':');
-                        _settings.DeviceIp = sp[0];
-                        if (sp.Length > 1) int.TryParse(sp[1], out _settings.Port);
-                    }
+                    var sp = target.Split(':');
+                    _settings.DeviceIp = sp[0];
+                    if (sp.Length > 1) int.TryParse(sp[1], out _settings.Port);
                 }
-                _settings.Save();
+            }
+            _settings.Save();
 
-                if (_flyout != null)
+            if (_flyout != null)
+            {
+                _flyout.SyncCurrentDeviceToUI();
+            }
+
+            ShowNotification("快捷键已触发", string.Format("正在快速直连: {0}...", devName), ToolTipIcon.Info);
+            bool ok = await ConnectAsync(target, binding != null ? binding.DeviceName : null);
+
+            // Dynamic IP Auto-Recovery:
+            // If Wi-Fi connection failed and we have a HardwareId, device IP might have changed!
+            // Run a quick scan to discover its new IP and reconnect automatically.
+            if (!ok && binding != null && !binding.IsUsb && !binding.IsBluetooth && !string.IsNullOrEmpty(binding.HardwareId))
+            {
+                LogLine(string.Format("快捷键直连 {0} 失败，启动动态 IP 自动寻踪扫描 (硬件ID: {1})...", target, binding.HardwareId));
+                ShowNotification("IP 寻踪中", string.Format("检测到设备可能更换了 IP，正在自动寻址 {0}...", binding.DisplayName), ToolTipIcon.Info);
+
+                var discovered = await ScanDevicesAsync();
+                var matched = discovered.FirstOrDefault(d => !d.IsBluetooth && !d.IsUsb && string.Equals(d.HardwareId, binding.HardwareId, StringComparison.OrdinalIgnoreCase));
+                if (matched != null && !string.IsNullOrEmpty(matched.Target) && matched.Target != target)
                 {
-                    _flyout.SyncCurrentDeviceToUI();
-                }
+                    LogLine(string.Format("寻踪成功！设备新 IP: {0}", matched.Target));
+                    binding.Target = matched.Target;
+                    _settings.Target = matched.Target;
+                    _settings.DeviceIp = matched.Ip;
+                    _settings.Port = matched.Port;
+                    _settings.Save();
+                    if (_flyout != null) _flyout.SyncCurrentDeviceToUI();
 
-                ShowNotification("快捷键已触发", string.Format("正在快速直连: {0}...", devName), ToolTipIcon.Info);
-                ConnectAsync(target, binding != null ? binding.DeviceName : null);
+                    ShowNotification("已重新定位设备", string.Format("已找到新 IP: {0}，正在重新连接...", matched.Target), ToolTipIcon.Info);
+                    await ConnectAsync(matched.Target, binding.DeviceName);
+                }
             }
         }
 
@@ -8464,10 +8870,17 @@ namespace WiFiAudioConnector
                 _app.CurrentSettings.DeviceName = item.Name;
                 _app.CurrentSettings.Target = item.Target;
 
-                if (!_app.CurrentSettings.DeviceHotkeys.ContainsKey(item.Target))
+                var existingBt = _app.CurrentSettings.FindBinding(item.BindingKey);
+                if (existingBt == null && !string.IsNullOrEmpty(item.HardwareId))
                 {
-                    _app.CurrentSettings.DeviceHotkeys[item.Target] = new DeviceHotkeyBinding
+                    existingBt = _app.CurrentSettings.FindBindingByHardware(item.HardwareId, false, true, item.Name);
+                }
+                if (existingBt == null)
+                {
+                    var nb = new DeviceHotkeyBinding
                     {
+                        BindingKey = item.BindingKey,
+                        HardwareId = item.HardwareId,
                         Target = item.Target,
                         DeviceName = item.Name,
                         IsUsb = false,
@@ -8476,7 +8889,13 @@ namespace WiFiAudioConnector
                         Key = Key.D3,
                         Enabled = true
                     };
+                    _app.CurrentSettings.DeviceHotkeys[nb.GetEffectiveBindingKey()] = nb;
                     _app.ApplyAllHotkeys();
+                }
+                else
+                {
+                    existingBt.Target = item.Target;
+                    if (!string.IsNullOrEmpty(item.HardwareId)) existingBt.HardwareId = item.HardwareId;
                 }
 
                 _app.CurrentSettings.Save();
@@ -8511,6 +8930,20 @@ namespace WiFiAudioConnector
                 {
                     _app.CurrentSettings.DeviceIp = item.Ip;
                     _app.CurrentSettings.Port = item.Port;
+                }
+
+                if (!item.IsCustom && !string.IsNullOrEmpty(item.Target))
+                {
+                    var existing = _app.CurrentSettings.FindBinding(item.BindingKey);
+                    if (existing == null && !string.IsNullOrEmpty(item.HardwareId))
+                    {
+                        existing = _app.CurrentSettings.FindBindingByHardware(item.HardwareId, item.IsUsb, false, item.Name);
+                    }
+                    if (existing != null)
+                    {
+                        existing.Target = item.Target;
+                        if (!string.IsNullOrEmpty(item.HardwareId)) existing.HardwareId = item.HardwareId;
+                    }
                 }
 
                 _app.CurrentSettings.Save();
@@ -8823,9 +9256,25 @@ namespace WiFiAudioConnector
 
         private string GetHotkeySummary()
         {
-            string target = _app.CurrentSettings.Target;
+            var sel = _cbDevices != null ? _cbDevices.SelectedItem as DeviceItem : null;
             DeviceHotkeyBinding b = null;
-            if (!string.IsNullOrEmpty(target) && _app.CurrentSettings.DeviceHotkeys.TryGetValue(target, out b))
+            if (sel != null)
+            {
+                b = _app.CurrentSettings.FindBinding(sel.BindingKey);
+                if (b == null && !string.IsNullOrEmpty(sel.HardwareId))
+                {
+                    b = _app.CurrentSettings.FindBindingByHardware(sel.HardwareId, sel.IsUsb, sel.IsBluetooth, sel.Name);
+                }
+            }
+            if (b == null)
+            {
+                string target = _app.CurrentSettings.Target;
+                if (!string.IsNullOrEmpty(target))
+                {
+                    b = _app.CurrentSettings.FindBinding(target);
+                }
+            }
+            if (b != null)
             {
                 if (b.Enabled && b.Key != Key.None)
                 {
