@@ -3921,6 +3921,7 @@ namespace WiFiAudioConnector
         private VirtualCamManager _vcamManager = null;
         private Process _micProc = null;
         private ToolStripMenuItem _trayCameraItem = null;
+        private ToolStripMenuItem _trayAutoStartItem = null;
         private BluetoothAudioConnector _btConnector = new BluetoothAudioConnector();
         private bool _isBluetoothConnected = false;
         private string _currentScrcpyTarget = null;
@@ -4137,6 +4138,7 @@ namespace WiFiAudioConnector
         {
             try
             {
+                Directory.SetCurrentDirectory(AppDomain.CurrentDomain.BaseDirectory);
                 LogLine("Main entered");
                 bool createdNew;
                 _mutex = new Mutex(true, "WiFiAudioConnector_Universal_Mutex", out createdNew);
@@ -4144,7 +4146,12 @@ namespace WiFiAudioConnector
                 if (!createdNew)
                 {
                     LogLine("Exiting because not createdNew");
-                    MessageBox.Show("WiFi 音频连接器已经在后台运行中！\n请查看桌面右下角系统托盘图标。", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
+                    string[] cmdArgs = Environment.GetCommandLineArgs();
+                    bool isSilent = cmdArgs != null && (Array.IndexOf(cmdArgs, "--autostart") >= 0 || Array.IndexOf(cmdArgs, "-autostart") >= 0 || Array.IndexOf(cmdArgs, "--silent") >= 0);
+                    if (!isSilent)
+                    {
+                        MessageBox.Show("WiFi 音频连接器已经在后台运行中！\n请查看桌面右下角系统托盘图标。", "提示", MessageBoxButton.OK, MessageBoxImage.Information);
+                    }
                     return;
                 }
 
@@ -4248,6 +4255,9 @@ namespace WiFiAudioConnector
                     EnsureCameraProbed(_settings.Target);
                 }
 
+                // Ensure auto-start registry is in sync with settings
+                SetStartupRegistry(_settings.AutoConnect);
+
                 if (_settings.AutoConnect)
                 {
                     LogLine("AutoConnect starting");
@@ -4291,16 +4301,20 @@ namespace WiFiAudioConnector
             menu.Items.Add("快捷键设置...", null, (s, e) => ShowHotkeyConfigWindow());
             menu.Items.Add(new ToolStripSeparator());
 
-            var autoStartItem = new ToolStripMenuItem("开机自动连接");
-            autoStartItem.Checked = _settings.AutoConnect;
-            autoStartItem.Click += (s, e) =>
+            _trayAutoStartItem = new ToolStripMenuItem("开机自启并自动连接");
+            _trayAutoStartItem.Checked = _settings.AutoConnect;
+            _trayAutoStartItem.Click += (s, e) =>
             {
                 _settings.AutoConnect = !_settings.AutoConnect;
-                autoStartItem.Checked = _settings.AutoConnect;
+                _trayAutoStartItem.Checked = _settings.AutoConnect;
                 _settings.Save();
                 SetStartupRegistry(_settings.AutoConnect);
+                if (_flyout != null)
+                {
+                    _flyout.SyncAutoConnectUI(_settings.AutoConnect);
+                }
             };
-            menu.Items.Add(autoStartItem);
+            menu.Items.Add(_trayAutoStartItem);
 
             var notifySubMenu = new ToolStripMenuItem("提示通知方式");
             _notifyMenuOsd = new ToolStripMenuItem("桌面 OSD 悬浮胶囊", null, (s, e) => SetNotificationMode("osd"));
@@ -5391,25 +5405,58 @@ namespace WiFiAudioConnector
             _flyout.Top = workingArea.Bottom - _flyout.Height - 12;
         }
 
-        private void SetStartupRegistry(bool enable)
+        public void SetStartupRegistry(bool enable)
         {
             try
             {
                 string runKey = @"SOFTWARE\Microsoft\Windows\CurrentVersion\Run";
                 using (var k = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(runKey, true))
                 {
-                    if (enable)
+                    if (k != null)
                     {
-                        string appPath = Process.GetCurrentProcess().MainModule.FileName;
-                        k.SetValue("WiFiAudioConnector", "\"" + appPath + "\"");
-                    }
-                    else
-                    {
-                        k.DeleteValue("WiFiAudioConnector", false);
+                        if (enable)
+                        {
+                            string appPath = Process.GetCurrentProcess().MainModule.FileName;
+                            k.SetValue("WiFiAudioConnector", "\"" + appPath + "\" --autostart");
+                            LogLine("SetStartupRegistry: Added " + appPath);
+                        }
+                        else
+                        {
+                            k.DeleteValue("WiFiAudioConnector", false);
+                            LogLine("SetStartupRegistry: Removed WiFiAudioConnector");
+                        }
                     }
                 }
             }
+            catch (Exception ex)
+            {
+                LogLine("SetStartupRegistry RunKey Exception: " + ex);
+            }
+
+            try
+            {
+                if (_trayAutoStartItem != null)
+                {
+                    _trayAutoStartItem.Checked = enable;
+                }
+            }
             catch { }
+
+            // Always ensure the obsolete legacy shortcut is removed from Windows Startup folder
+            try
+            {
+                string startupFolder = Environment.GetFolderPath(Environment.SpecialFolder.Startup);
+                string oldLnk = Path.Combine(startupFolder, "AudioPlaybackConnector64.exe.lnk");
+                if (File.Exists(oldLnk))
+                {
+                    File.Delete(oldLnk);
+                    LogLine("SetStartupRegistry: Deleted obsolete AudioPlaybackConnector64.exe.lnk");
+                }
+            }
+            catch (Exception ex)
+            {
+                LogLine("SetStartupRegistry CleanOldLnk Exception: " + ex);
+            }
         }
 
         private void InitHotkey()
@@ -8630,8 +8677,18 @@ namespace WiFiAudioConnector
                 IsChecked = _app.CurrentSettings.AutoConnect
             };
             if (_toggleSwitchStyle != null) _cbAutoConnect.Style = _toggleSwitchStyle;
-            _cbAutoConnect.Checked += (s, e) => { _app.CurrentSettings.AutoConnect = true; _app.CurrentSettings.Save(); };
-            _cbAutoConnect.Unchecked += (s, e) => { _app.CurrentSettings.AutoConnect = false; _app.CurrentSettings.Save(); };
+            _cbAutoConnect.Checked += (s, e) =>
+            {
+                _app.CurrentSettings.AutoConnect = true;
+                _app.CurrentSettings.Save();
+                _app.SetStartupRegistry(true);
+            };
+            _cbAutoConnect.Unchecked += (s, e) =>
+            {
+                _app.CurrentSettings.AutoConnect = false;
+                _app.CurrentSettings.Save();
+                _app.SetStartupRegistry(false);
+            };
             optsPanel.Children.Add(_cbAutoConnect);
 
             // Hotkey row
@@ -8691,6 +8748,14 @@ namespace WiFiAudioConnector
             UpdateCodecSegmentsUI();
             UpdateLatencySegmentsUI();
             UpdateState(ConnectionState.Disconnected);
+        }
+
+        public void SyncAutoConnectUI(bool isChecked)
+        {
+            if (_cbAutoConnect != null && _cbAutoConnect.IsChecked != isChecked)
+            {
+                _cbAutoConnect.IsChecked = isChecked;
+            }
         }
 
         public async void TriggerScan()
