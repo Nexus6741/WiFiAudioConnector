@@ -1336,6 +1336,7 @@ namespace WiFiAudioConnector
             {
                 _volumeContent.Visibility = Visibility.Visible;
                 _hintPanel.Visibility = Visibility.Collapsed;
+                _iconText.Foreground = new SolidColorBrush(Color.FromRgb(56, 189, 248));
 
                 if (isMuted)
                 {
@@ -1380,7 +1381,7 @@ namespace WiFiAudioConnector
             }));
         }
 
-        public void ShowHint(string title, string hint)
+        public void ShowHint(string title, string hint, int durationMs = 1800, string customIcon = null, System.Windows.Media.Brush iconBrush = null)
         {
             Dispatcher.BeginInvoke(new Action(() =>
             {
@@ -1393,39 +1394,52 @@ namespace WiFiAudioConnector
                 _hintSubtitle.Text = hint ?? "";
                 _hintSubtitle.Visibility = string.IsNullOrEmpty(hint) ? Visibility.Collapsed : Visibility.Visible;
 
-                string combined = ((title ?? "") + " " + (hint ?? "")).ToLowerInvariant();
-                if (combined.Contains("已就绪") || combined.Contains("已连接") || combined.Contains("成功"))
+                if (!string.IsNullOrEmpty(customIcon))
                 {
-                    _iconText.Text = "\uE73E";
-                }
-                else if (combined.Contains("正在连接") || combined.Contains("直连") || combined.Contains("重载"))
-                {
-                    _iconText.Text = "\uE72C";
-                }
-                else if (combined.Contains("断开") || combined.Contains("停止"))
-                {
-                    _iconText.Text = "\uECF0";
-                }
-                else if (combined.Contains("快捷键"))
-                {
-                    _iconText.Text = "\uE765";
-                }
-                else if (combined.Contains("媒体") || combined.Contains("播放") || combined.Contains("上一首") || combined.Contains("下一首"))
-                {
-                    _iconText.Text = "\uEC4F";
-                }
-                else if (combined.Contains("电量"))
-                {
-                    _iconText.Text = "\uE83F";
-                }
-                else if (combined.Contains("失败") || combined.Contains("错误"))
-                {
-                    _iconText.Text = "\uE7BA";
+                    _iconText.Text = customIcon;
                 }
                 else
                 {
-                    _iconText.Text = "\uE946";
+                    string combined = ((title ?? "") + " " + (hint ?? "")).ToLowerInvariant();
+                    if (combined.Contains("已就绪") || combined.Contains("已连接") || combined.Contains("成功"))
+                    {
+                        _iconText.Text = "\uE73E";
+                    }
+                    else if (combined.Contains("正在连接") || combined.Contains("直连") || combined.Contains("重载"))
+                    {
+                        _iconText.Text = "\uE72C";
+                    }
+                    else if (combined.Contains("断开") || combined.Contains("停止"))
+                    {
+                        _iconText.Text = "\uECF0";
+                    }
+                    else if (combined.Contains("快捷键"))
+                    {
+                        _iconText.Text = "\uE765";
+                    }
+                    else if (combined.Contains("媒体") || combined.Contains("播放") || combined.Contains("上一首") || combined.Contains("下一首"))
+                    {
+                        _iconText.Text = "\uEC4F";
+                    }
+                    else if (combined.Contains("告急") || combined.Contains("极低"))
+                    {
+                        _iconText.Text = "\uE859";
+                    }
+                    else if (combined.Contains("电量"))
+                    {
+                        _iconText.Text = "\uE83F";
+                    }
+                    else if (combined.Contains("失败") || combined.Contains("错误"))
+                    {
+                        _iconText.Text = "\uE7BA";
+                    }
+                    else
+                    {
+                        _iconText.Text = "\uE946";
+                    }
                 }
+
+                _iconText.Foreground = iconBrush ?? new SolidColorBrush(Color.FromRgb(56, 189, 248));
 
                 PositionBottomRight();
 
@@ -1447,7 +1461,7 @@ namespace WiFiAudioConnector
                 }
 
                 _fadeTimer.Stop();
-                _fadeTimer.Interval = TimeSpan.FromMilliseconds(1800);
+                _fadeTimer.Interval = TimeSpan.FromMilliseconds(durationMs);
                 _fadeTimer.Start();
             }));
         }
@@ -4121,7 +4135,8 @@ namespace WiFiAudioConnector
         private CancellationTokenSource _batteryCts = null;
         private BatteryInfo _lastBatteryInfo = null;
         public BatteryInfo LastBatteryInfo { get { return _lastBatteryInfo; } set { _lastBatteryInfo = value; } }
-        private bool _hasAlertedLowBattery = false;
+        private bool _hasAlerted20 = false;
+        private bool _hasAlerted10 = false;
 
         public static void LogLine(string s)
         {
@@ -6049,14 +6064,41 @@ namespace WiFiAudioConnector
                                 UpdateTrayTooltipWithBattery();
                             }));
 
-                            if (info.Level <= 20 && !info.IsCharging && !_hasAlertedLowBattery)
+                            string devName = _currentScrcpyDeviceName ?? _settings.DeviceName ?? "手机";
+
+                            if (!info.IsCharging)
                             {
-                                _hasAlertedLowBattery = true;
-                                ShowNotification("手机低电量提醒", string.Format("手机当前电量为 {0}% (未充电)，请及时充电以防音频推流中断", info.Level), ToolTipIcon.Warning);
+                                if (info.Level <= 10)
+                                {
+                                    if (!_hasAlerted10)
+                                    {
+                                        _hasAlerted10 = true;
+                                        _hasAlerted20 = true;
+                                        TriggerLowBatteryAlert(devName, info.Level, isCritical: true);
+                                    }
+                                }
+                                else if (info.Level <= 20)
+                                {
+                                    if (!_hasAlerted20)
+                                    {
+                                        _hasAlerted20 = true;
+                                        TriggerLowBatteryAlert(devName, info.Level, isCritical: false);
+                                    }
+                                }
+                                else if (info.Level > 25)
+                                {
+                                    _hasAlerted20 = false;
+                                    _hasAlerted10 = false;
+                                }
+                                else if (info.Level > 12)
+                                {
+                                    _hasAlerted10 = false;
+                                }
                             }
-                            else if (info.Level > 25 || info.IsCharging)
+                            else
                             {
-                                _hasAlertedLowBattery = false;
+                                _hasAlerted20 = false;
+                                _hasAlerted10 = false;
                             }
                         }
                     }
@@ -6071,6 +6113,51 @@ namespace WiFiAudioConnector
             });
         }
 
+        public void TriggerLowBatteryAlert(string devName, int level, bool isCritical)
+        {
+            Dispatcher.BeginInvoke(new Action(() =>
+            {
+                string title = isCritical ? "手机电量告急" : "手机低电量提醒";
+                string msg = isCritical
+                    ? string.Format("{0} 电量仅剩 {1}%，即将自动关机！请及时充电", devName, level)
+                    : string.Format("{0} 电量仅剩 {1}%，请及时充电", devName, level);
+
+                LogLine(string.Format("LowBatteryAlert: [{0}] {1} (Critical: {2})", title, msg, isCritical));
+
+                try
+                {
+                    if (isCritical)
+                    {
+                        System.Media.SystemSounds.Hand.Play();
+                    }
+                    else
+                    {
+                        System.Media.SystemSounds.Exclamation.Play();
+                    }
+                }
+                catch { }
+
+                if (_settings.NotificationMode == "windows")
+                {
+                    if (_notifyIcon != null)
+                    {
+                        _notifyIcon.ShowBalloonTip(4500, title, msg, isCritical ? ToolTipIcon.Error : ToolTipIcon.Warning);
+                    }
+                }
+                else
+                {
+                    if (_volumeOsd != null)
+                    {
+                        var iconBrush = isCritical
+                            ? new SolidColorBrush(Color.FromRgb(239, 68, 68))
+                            : new SolidColorBrush(Color.FromRgb(245, 158, 11));
+                        string iconChar = isCritical ? "\uE859" : "\uE83F";
+                        _volumeOsd.ShowHint(title, msg, isCritical ? 4500 : 3800, iconChar, iconBrush);
+                    }
+                }
+            }));
+        }
+
         public void StopBatteryMonitor()
         {
             try
@@ -6083,6 +6170,8 @@ namespace WiFiAudioConnector
             }
             catch { }
             _batteryCts = null;
+            _hasAlerted20 = false;
+            _hasAlerted10 = false;
         }
 
         public void UpdateTrayTooltipWithBattery()
@@ -6755,6 +6844,8 @@ namespace WiFiAudioConnector
         private DateTime _lastHideTime = DateTime.MinValue;
         public bool IsHiding { get { return _isHiding; } }
         public DateTime LastHideTime { get { return _lastHideTime; } }
+        private DispatcherTimer _autoScanTimer = null;
+        private bool _isScanning = false;
         private CheckBox _cbMutePhone;
         private Button _btnTriAudio;
         private Button _btnTriMic;
@@ -6966,7 +7057,12 @@ namespace WiFiAudioConnector
                 _preferredBackSize = (_app.CurrentSettings.CameraFacing == "front") ? "3840x2160" : _app.CurrentSettings.CameraSize;
             }
             BuildUI();
-            Loaded += (s, e) => TriggerScan();
+            Loaded += (s, e) => TriggerScan(false);
+
+            _autoScanTimer = new DispatcherTimer();
+            _autoScanTimer.Interval = TimeSpan.FromMinutes(30);
+            _autoScanTimer.Tick += (s, e) => TriggerScan(false);
+            _autoScanTimer.Start();
         }
 
         protected override void OnClosing(System.ComponentModel.CancelEventArgs e)
@@ -8758,20 +8854,41 @@ namespace WiFiAudioConnector
             }
         }
 
-        public async void TriggerScan()
+        public async void TriggerScan(bool isManual = true)
         {
-            SetButtonLoading(_btnScan, true);
-            _btnScan.Content = UIHelper.CreateIconText("\uE72C", "扫描中", 11, 11);
+            if (_isScanning) return;
+            _isScanning = true;
 
-            var discovered = await _app.ScanDevicesAsync();
+            if (isManual && _btnScan != null)
+            {
+                SetButtonLoading(_btnScan, true);
+                _btnScan.Content = UIHelper.CreateIconText("\uE72C", "扫描中", 11, 11);
+            }
 
-            _deviceList.Clear();
+            List<DeviceItem> discovered = null;
+            try
+            {
+                discovered = await _app.ScanDevicesAsync();
+            }
+            catch { }
+            finally
+            {
+                _isScanning = false;
+            }
 
-            // Add remembered current device if valid
+            if (discovered == null) discovered = new List<DeviceItem>();
+
+            // If user is currently choosing a device from dropdown during auto-scan, avoid disrupting UI
+            if (!isManual && _cbDevices != null && _cbDevices.IsDropDownOpen)
+            {
+                return;
+            }
+
+            var newItems = new List<DeviceItem>();
             bool hasCurrent = false;
             foreach (var d in discovered)
             {
-                _deviceList.Add(d);
+                newItems.Add(d);
                 if (d.Target == _app.CurrentSettings.Target || (d.Ip == _app.CurrentSettings.DeviceIp && d.Port == _app.CurrentSettings.Port))
                 {
                     hasCurrent = true;
@@ -8781,7 +8898,7 @@ namespace WiFiAudioConnector
             if (!hasCurrent && !string.IsNullOrEmpty(_app.CurrentSettings.Target))
             {
                 bool isBtTarget = _app.CurrentSettings.Target.StartsWith(@"\\?\BTHENUM", StringComparison.OrdinalIgnoreCase) || _app.CurrentSettings.Target.StartsWith("Bluetooth#", StringComparison.OrdinalIgnoreCase);
-                _deviceList.Add(new DeviceItem
+                newItems.Add(new DeviceItem
                 {
                     Name = _app.CurrentSettings.DeviceName + " (离线)",
                     Target = _app.CurrentSettings.Target,
@@ -8794,7 +8911,7 @@ namespace WiFiAudioConnector
             }
 
             // Custom entry
-            _deviceList.Add(new DeviceItem
+            newItems.Add(new DeviceItem
             {
                 Name = "手动输入...",
                 Target = "",
@@ -8804,33 +8921,65 @@ namespace WiFiAudioConnector
                 IsCustom = true
             });
 
-            _cbDevices.ItemsSource = null;
-            _cbDevices.ItemsSource = _deviceList;
-
-            // Select active device
-            int selIdx = -1;
-            for (int i = 0; i < _deviceList.Count; i++)
+            // Check if device list changed to avoid unnecessary re-binding and flicker
+            bool listChanged = false;
+            if (_deviceList.Count != newItems.Count)
             {
-                if (_deviceList[i].Target == _app.CurrentSettings.Target)
+                listChanged = true;
+            }
+            else
+            {
+                for (int i = 0; i < newItems.Count; i++)
                 {
-                    selIdx = i;
-                    break;
+                    if (_deviceList[i].Target != newItems[i].Target ||
+                        _deviceList[i].Name != newItems[i].Name ||
+                        _deviceList[i].IsUsb != newItems[i].IsUsb ||
+                        _deviceList[i].IsBluetooth != newItems[i].IsBluetooth)
+                    {
+                        listChanged = true;
+                        break;
+                    }
                 }
             }
-            if (selIdx < 0 && _deviceList.Count > 0)
+
+            if (listChanged || isManual || _cbDevices.ItemsSource == null)
             {
-                // Prefer first online device (not custom, not offline)
+                var oldSel = _cbDevices.SelectedItem as DeviceItem;
+                string prevTarget = (oldSel != null) ? oldSel.Target : _app.CurrentSettings.Target;
+
+                _deviceList.Clear();
+                foreach (var item in newItems)
+                {
+                    _deviceList.Add(item);
+                }
+
+                _cbDevices.ItemsSource = null;
+                _cbDevices.ItemsSource = _deviceList;
+
+                int selIdx = -1;
                 for (int i = 0; i < _deviceList.Count; i++)
                 {
-                    if (!_deviceList[i].IsCustom && !_deviceList[i].Name.Contains("(离线)"))
+                    if (_deviceList[i].Target == prevTarget)
                     {
                         selIdx = i;
                         break;
                     }
                 }
-                if (selIdx < 0) selIdx = 0;
+                if (selIdx < 0 && _deviceList.Count > 0)
+                {
+                    for (int i = 0; i < _deviceList.Count; i++)
+                    {
+                        if (!_deviceList[i].IsCustom && !_deviceList[i].Name.Contains("(离线)"))
+                        {
+                            selIdx = i;
+                            break;
+                        }
+                    }
+                    if (selIdx < 0) selIdx = 0;
+                }
+                _cbDevices.SelectedIndex = Math.Max(0, selIdx);
             }
-            _cbDevices.SelectedIndex = Math.Max(0, selIdx);
+
             var curSel = _cbDevices.SelectedItem as DeviceItem;
             if (curSel != null)
             {
@@ -8838,12 +8987,15 @@ namespace WiFiAudioConnector
                 RefreshBatteryForSelectedDevice(curSel);
             }
 
-            SetButtonLoading(_btnScan, false);
-            _btnScan.Content = UIHelper.CreateIconText("\uE72C", "刷新", 11, 11);
-            _btnScan.ToolTip = string.Format("上次扫描: 发现 {0} 台设备\n局域网网段: {1}\n扫描端口: {2}",
-                discovered.Count,
-                AdbLanScanner.LastScannedSubnet ?? "未检测到",
-                string.Join(", ", _app.CurrentSettings.GetScanPortsList()));
+            if (_btnScan != null)
+            {
+                SetButtonLoading(_btnScan, false);
+                _btnScan.Content = UIHelper.CreateIconText("\uE72C", "刷新", 11, 11);
+                _btnScan.ToolTip = string.Format("上次扫描: 发现 {0} 台设备 (面板打开时每5s自动刷新)\n局域网网段: {1}\n扫描端口: {2}",
+                    discovered.Count,
+                    AdbLanScanner.LastScannedSubnet ?? "未检测到",
+                    string.Join(", ", _app.CurrentSettings.GetScanPortsList()));
+            }
         }
 
         public void UpdateScrcpyControlsState(bool isBluetooth, bool isUsb)
@@ -9566,6 +9718,14 @@ namespace WiFiAudioConnector
             _isHiding = false;
             _isShowing = true;
 
+            if (_autoScanTimer != null)
+            {
+                _autoScanTimer.Stop();
+                _autoScanTimer.Interval = TimeSpan.FromSeconds(5);
+                _autoScanTimer.Start();
+            }
+            TriggerScan(false);
+
             base.Show();
             try
             {
@@ -9612,6 +9772,13 @@ namespace WiFiAudioConnector
             _isHiding = true;
             _isShowing = false;
             _lastHideTime = DateTime.UtcNow;
+
+            if (_autoScanTimer != null)
+            {
+                _autoScanTimer.Stop();
+                _autoScanTimer.Interval = TimeSpan.FromMinutes(30);
+                _autoScanTimer.Start();
+            }
 
             var ease = new CubicEase { EasingMode = EasingMode.EaseIn };
 
